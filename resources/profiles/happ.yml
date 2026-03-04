@@ -1,0 +1,9 @@
+allow_hwid_override: true
+headers:
+  x-device-os: "Windows"
+  x-ver-os: "11_10.0.28000"
+  x-device-model: "PC-X_x86_64"
+  x-device-locale: "en-US"
+  x-hwid: "f92b6d44-3a1f-4c97-b51e-72d9a0ef3c6b"
+  accept-language: "en-US,en;q=0.9"
+  accept-encoding: "gzip, deflate"

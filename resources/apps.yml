@@ -1,0 +1,61 @@
+# Share/app catalog for UI.
+# Placeholders for deeplink:
+# - {url}: raw link
+# - {encoded_url}: encodeURIComponent(link)
+
+apps:
+  - key: happ
+    label: Happ
+    deeplink: "happ://add/{url}"
+    platforms: [android, ios, linux, windows, macos]
+    formats: [raw]
+
+  - key: flclashx
+    label: FlClashX
+    deeplink: "flclashx://install-config?url={url}"
+    platforms: [android, ios, linux, windows, macos]
+    formats: [yml]
+
+  - key: v2raytun
+    label: v2RayTun
+    deeplink: "v2raytun://import/{url}"
+    platforms: [android, ios]
+    formats: [raw]
+
+  - key: koala-clash
+    label: Koala Clash
+    deeplink: "koala-clash://install-config?url={url}"
+    platforms: [linux, windows, macos]
+    formats: [yml]
+
+  - key: prizrak-box
+    label: Prizrak-Box
+    deeplink: "prizrak-box://install-config?url={url}"
+    platforms: [linux, windows, macos]
+    formats: [yml]
+
+  - key: clashmi
+    label: Clash Mi
+    deeplink: "clashmi://install-config?xhwid=true&overwrite=no&name=tg_2002282141&url={url}"
+    platforms: [ios]
+    formats: [yml]
+
+  - key: shadowrocket
+    label: Shadowrocket
+    deeplink: "shadowrocket://add/{url}#tg_2002282141"
+    platforms: [ios]
+    formats: [raw]
+
+recommended_by_os:
+  windows: [flclashx, koala-clash, prizrak-box]
+  macos: [happ, flclashx]
+  linux: [flclashx, koala-clash]
+  android: [happ, flclashx]
+  ios: [happ, clashmi]
+
+order_by_os:
+  windows: [flclashx, koala-clash, prizrak-box, happ]
+  macos: [happ, flclashx, koala-clash, prizrak-box]
+  linux: [flclashx, koala-clash, prizrak-box, happ]
+  android: [happ, flclashx, v2raytun]
+  ios: [happ, clashmi, v2raytun, shadowrocket]

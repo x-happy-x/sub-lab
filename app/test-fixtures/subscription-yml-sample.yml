@@ -1,0 +1,80 @@
+mixed-port: 7890
+allow-lan: true
+mode: global
+log-level: info
+dns:
+  enable: true
+  use-hosts: true
+  enhanced-mode: fake-ip
+proxies:
+  - name: "RU MAIN"
+    type: vless
+    server: node-ru-1.example.net
+    port: 443
+    network: tcp
+    udp: true
+    tls: true
+    servername: cdn.example.net
+    alpn:
+      - http/1.1
+    reality-opts:
+      public-key: EXAMPLE_PUBLIC_KEY_001
+      short-id: aa11bb22cc33dd44
+    client-fingerprint: chrome
+    uuid: 11111111-1111-4111-8111-111111111111
+    packet-encoding: xudp
+    flow: xtls-rprx-vision
+  - name: "DE BACKUP"
+    type: vless
+    server: node-de-1.example.net
+    port: 443
+    network: tcp
+    udp: true
+    tls: true
+    servername: cdn.example.net
+    alpn:
+      - h2
+      - http/1.1
+    reality-opts:
+      public-key: EXAMPLE_PUBLIC_KEY_002
+      short-id: ee55ff66aa77bb88
+    client-fingerprint: qq
+    uuid: 22222222-2222-4222-8222-222222222222
+    packet-encoding: xudp
+    flow: xtls-rprx-vision
+  - name: "PL WS"
+    type: vless
+    server: node-pl-1.example.net
+    port: 443
+    network: ws
+    udp: true
+    tls: true
+    servername: ws.example.net
+    alpn:
+      - h2
+      - http/1.1
+    ws-opts:
+      path: /ws
+      headers:
+        Host: ws.example.net
+    client-fingerprint: chrome
+    uuid: 33333333-3333-4333-8333-333333333333
+    packet-encoding: xudp
+  - name: "US GAME"
+    type: vless
+    server: node-us-1.example.net
+    port: 52006
+    network: tcp
+    udp: true
+    tls: true
+    servername: game.example.net
+    alpn:
+      - h2
+      - http/1.1
+    reality-opts:
+      public-key: EXAMPLE_PUBLIC_KEY_003
+      short-id: cc99dd00ee11ff22
+    client-fingerprint: safari
+    uuid: 44444444-4444-4444-8444-444444444444
+    packet-encoding: xudp
+    flow: xtls-rprx-vision

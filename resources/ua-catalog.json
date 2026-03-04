@@ -1,0 +1,23 @@
+{
+  "__default__": "SubLab/UA Default (Windows)",
+  "windows": {
+    "flclashx": "FlClash X/0.8.74 (Windows 11; Win64; x64)",
+    "happ": "Happ/1.2.0 (Windows 11; Win64; x64)"
+  },
+  "android": {
+    "flclashx": "FlClash X/0.8.74 (Android 14)",
+    "happ": "Happ/1.2.0 (Android 14)"
+  },
+  "ios": {
+    "flclashx": "FlClash X/0.8.74 (iOS 17.5; iPhone)",
+    "happ": "Happ/1.2.0 (iOS 17.5; iPhone)"
+  },
+  "macos": {
+    "flclashx": "FlClash X/0.8.74 (macOS 14.6; arm64)",
+    "happ": "Happ/1.2.0 (macOS 14.6; arm64)"
+  },
+  "linux": {
+    "flclashx": "FlClash X/0.8.74 (Linux x86_64)",
+    "happ": "Happ/1.2.0 (Linux x86_64)"
+  }
+}

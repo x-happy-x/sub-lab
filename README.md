@@ -1,132 +1,184 @@
 # sub-mirror
 
-Сервис зеркалирует xray подписки с возможность конвертации в формат Clash и передачей заголовков через профили (`*.yml`) или напрямую из запроса.
-В контейнере запускаются два процесса: Node.js приложение и tindy2013/subconverter.
+Сервис зеркалирует подписки, конвертирует форматы (`raw`/`yml`), хранит короткие ссылки, пользователей и сессии в SQLite, и отдает UI (главная, `/admin`, публичная страница `/l/:id`).
 
-## Возможности
-- Проксирование подписки с сохранением оригинального ответа.
-- Конвертация через subconverter или встроенный fallback для VLESS.
-- Кэширование результата на диске и выдача последней успешной версии.
-- Профили в отдельных YAML-файлах с возможностью комбинировать несколько профилей.
-- Режимы подстановки заголовков: приоритет запроса, всегда из файла, обязательные заголовки из запроса.
-- Простые эндпоинты для проверки состояния.
+В контейнере запускаются:
+- Node.js API/UI (`8788`)
+- встроенный subconverter (`8787`)
 
-## Быстрый старт (Docker)
+## Что умеет
+- Получение подписки с конвертацией (`/sub`).
+- Выдача последней успешной версии из кэша (`/last`).
+- Короткие ссылки `/l/:id` с публичной страницей подключения.
+- Публичные API для страницы шаринга:
+  - `/api/public-short-links/:id`
+  - `/api/public-short-links/:id/meta`
+- Каталог приложений и гайды:
+  - `/api/apps`
+  - `/api/apps/guide?app=...&os=...`
+- Авторизация и роли (`user`/`admin`), админка `/admin`.
+- Favorites, mock-sources, профильный редактор.
+
+## Быстрый старт
+
+### Локальная сборка (рекомендуется)
 ```bash
-docker compose up --build
+docker compose -f docker-compose.local.yml up -d --build
 ```
-Порты по умолчанию:
-- `8788` — Node.js приложение
-- `8787` — subconverter
 
-## Использование образа из GHCR
+Доступ:
+- `http://localhost:25500` -> приложение (`8788` внутри контейнера)
+
+### GHCR образ
 ```bash
-docker pull ghcr.io/x-happy-x/sub-mirror:latest
-docker run --rm -p 8788:8788 -p 8787:8787 -v ./data:/data ghcr.io/x-happy-x/sub-mirror:latest
+docker compose up -d
 ```
 
-## Локальный запуск (без Docker)
-Требуется Node.js 18+.
+Доступ:
+- `http://localhost:25500` -> приложение (`8788`)
+- `http://localhost:25501` -> subconverter (`8787`, опционально нужен только для прямой отладки)
+
+## Локальный запуск без Docker
+Node.js 18+:
 ```bash
-export SUB_URL="https://example.com/sub"
-export USE_CONVERTER=1
+export SUB_URL=""
+export OUTPUT="clash"
 export CONVERTER_URL="http://127.0.0.1:8787/sub"
 export SOURCE_URL="http://127.0.0.1:8788/source.txt"
 node app/server.js
 ```
 
 ## Основные эндпоинты
-- `GET /sub?sub_url=...` — получить подписку с конвертацией (если включена).
-- `GET /last?sub_url=...` — отдать последнюю успешную версию из кэша.
-- `GET /health` — простая проверка живости.
-- `ANY /debug/echo` — отладочный endpoint: возвращает метод, query, заголовки и тело запроса.
-- `GET /raw.txt`, `/subscription.yaml`, `/converted.txt`, `/status.json` — статические файлы из `data/`.
+
+### Публичные/служебные
+- `GET /` — SPA (главная).
+- `GET /admin` — SPA для admin.
+- `GET /health` — `ok`.
+- `ANY /debug/echo` — отладочный echo.
+- `GET /raw.txt`, `/subscription.yaml`, `/converted.txt`, `/status.json` — debug-файлы из `/data`.
+
+### Подписки
+- `GET /sub` — получить подписку (fetch + convert).
+- `GET /last` — получить последнюю успешную из кэша.
+- `GET /subscription.yaml` — alias на `/sub`.
+
+Параметры:
+- `sub_url`
+- `output` (`raw`, `clash`, `yml`, `yaml`)
+- `app`, `device`
+- `profile`, `profiles`
+- `hwid`
+- legacy: `use_converter`
 
 Пример:
 ```bash
-curl "http://localhost:8788/sub?sub_url=https://example.com/sub"
+curl "http://localhost:25500/sub?sub_url=https://example.com/sub&output=raw"
 ```
 
-## Параметры запросов и заголовки
-Query параметры:
-- `sub_url` — URL подписки (обязателен для `/sub` и `/last`, если не задан `SUB_URL`).
-- `use_converter` — `1`/`0`, включить/выключить конвертацию для запроса.
-- `profile` — имя профиля (можно передавать несколько раз).
-- `profiles` — список профилей через запятую, применяется слева направо.
-- `hwid` — переопределить значение заголовка `x-hwid` (если профиль использует этот заголовок).
+### Короткие ссылки
+- `POST /api/short-links` (auth)
+- `GET /api/short-links/:id` (auth)
+- `PUT /api/short-links/:id` (auth)
+- `GET /l/:id` (public resolve)
 
-Заголовки:
-- `X-Sub-Url` — альтернатива `sub_url`.
-- `X-Use-Converter` — альтернатива `use_converter`.
-- `X-Profile` / `X-Profiles` — альтернатива параметрам `profile`/`profiles`.
-- `X-Hwid` — альтернатива `hwid`.
+`/l/:id` поддерживает query override:
+- `?type=raw`
+- `?type=yml`
 
-Пример с заголовками:
-```bash
-curl -H "X-Sub-Url: https://example.com/sub" -H "X-Use-Converter: 1" "http://localhost:8788/sub"
-```
+Это переопределяет `output` для резолва короткой ссылки.
 
-## Профили (`*.yml`)
-Профили ищутся в:
-- `PROFILE_DIR` (если задана переменная окружения)
+### Публичная страница шаринга
+- `GET /api/public-short-links/:id`
+- `GET /api/public-short-links/:id/meta`
+
+### Каталог приложений и инструкции
+- `GET /api/apps`
+- `GET /api/apps/guide?app=<key>&os=<key>`
+
+Конфиг:
+- `resources/apps.yml`
+- `resources/app-guides/<app>/*.yml`
+
+### Auth и admin
+- `GET /api/auth/me`
+- `POST /api/auth/login` (`{ username, password }`)
+- `POST /api/auth/logout`
+- `GET /api/admin/users` (admin)
+- `POST /api/admin/users` (admin)
+- `PUT /api/admin/users/:username` (admin)
+- `DELETE /api/admin/users/:username` (admin)
+
+Ограничения безопасности:
+- нельзя удалить текущего admin.
+- нельзя сменить роль текущего admin самому себе.
+
+### Прочие API (auth)
+- `GET/PUT /api/favorites`
+- `POST /api/sub-test`
+- `POST /api/mock-sources`
+- `GET/PUT /api/mock-sources/:id`
+- `GET/POST /api/mock-sources/:id/logs`
+- `GET /api/profile-editor/list`
+- `GET/PUT/DELETE /api/profile-editor/file`
+- `GET /api/ua-catalog`
+
+## Профили и UA
+
+Профили читаются из:
+- `PROFILE_DIR` (если задан)
 - `/data/profiles`
-- `./profiles`
+- `resources/profiles`
 
-Пример профиля:
+Текущий формат профиля:
 ```yaml
-sub_url: "https://example.com/sub"
-use_converter: true
-header_policy: prefer_request
 allow_hwid_override: true
 headers:
-  user-agent: "MyClient/1.0"
-  x-api-key: "from-file"
-required_headers:
-  - x-session-id
+  x-device-os: "Windows"
+  x-hwid: "..."
 ```
 
-`header_policy`:
-- `prefer_request` — заголовки из запроса перекрывают значения из файла.
-- `file_only` — для совпадающих ключей всегда используются значения из файла.
-- `require_request` — как `prefer_request`, но заголовки из `required_headers` обязательны в запросе.
+Семантика `hwid`:
+- `?hwid=...` (из UI/query) всегда имеет приоритет.
+- `X-Hwid` из входящих заголовков учитывается только если `allow_hwid_override: true`.
 
-`allow_hwid_override`:
-- `true` — `hwid`/`X-Hwid` из запроса может переопределить `x-hwid` в профиле.
-- `false` — `x-hwid` берется только из профиля и не заменяется из запроса.
+UA каталог:
+- `resources/ua-catalog.json`
+- выбирается по паре `device + app`, иначе `__default__`.
 
-Совмещение профилей:
+## Конфигурация (env)
+- `SUB_URL` — default источник.
+- `OUTPUT` — default output (`raw`/`clash`).
+- `USE_CONVERTER` — legacy fallback для default output.
+- `CONVERTER_URL` — URL subconverter.
+- `SOURCE_URL` — URL source для subconverter.
+- `PROFILE_DIR` — каталог профилей.
+- `ADMIN_SEED_PATH` — JSON seed admins (по умолчанию `/resources/admin.json` в контейнере).
+- `AUTH_SESSION_TTL_SEC` — TTL сессии.
+- `APP_PORT`, `SUBCONVERTER_PORT`.
+
+## Bootstrap admin
+Если в БД нет пользователей, admin берется из seed-файла (`resources/admin.json`).
+Также при старте недостающие admin-пользователи из seed добавляются в существующую БД.
+
+Пример:
+```json
+{
+  "users": [
+    { "username": "admin", "password": "StrongPass123", "role": "admin" }
+  ]
+}
+```
+
+## Тесты
 ```bash
-curl "http://localhost:8788/sub?profiles=base,region_ru,happ"
-```
-Если один ключ задан в нескольких профилях, используется значение из последнего профиля в списке.
-
-Готовые профили в репозитории:
-- `happ`
-- `linux-notebook`
-- `aqm-lx1`
-- `ios26`
-- `android16`
-- `windows11`
-
-## Echo endpoint
-Проверка входящих заголовков и тела:
-```bash
-curl -X POST "http://localhost:8788/debug/echo?x=1&x=2" \
-  -H "X-Test: hello" \
-  -H "Content-Type: application/json" \
-  -d '{"ping":"pong"}'
+node --test app/server.test.js
 ```
 
-## Конфигурация
-Основные переменные окружения:
-- `SUB_URL` — URL подписки по умолчанию.
-- `USE_CONVERTER` — `1`/`0`, включить subconverter.
-- `CONVERTER_URL` — URL subconverter (по умолчанию `http://127.0.0.1:8787/sub`).
-- `SOURCE_URL` — URL, который subconverter использует для чтения исходного файла.
-- `PROFILE_DIR` — каталог с профилями (`*.yml`), если нужно переопределить путь.
-- `APP_PORT`, `SUBCONVERTER_PORT` — порты приложения и subconverter.
+## CI (GitHub Actions)
+- Workflow: `.github/workflows/docker-image.yml`
+- На PR выполняются проверки (`backend tests` + `frontend build`) и docker build без push.
+- Публикация образа в GHCR выполняется только на `push`.
+- Важно: фронтенд использует локальный tarball UI-кита (`frontend/vendor/x-happy-x-ui-kit-*.tgz`), поэтому `frontend/vendor/` должен быть в репозитории.
 
-## Данные и кэш
-- `data/` монтируется как volume и хранит:
-  - `raw.txt`, `subscription.yaml`, `converted.txt`, `status.json`
-  - `cache/` — кэшированные ответы
+## Deploy helper
+`deploy.sh` синхронизирует проект на remote, поднимает `docker-compose.local.yml` и проверяет `/health`.

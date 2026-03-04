@@ -1,0 +1,13 @@
+.app-svg-icon {
+  display: inline-flex;
+  width: 1em;
+  height: 1em;
+  line-height: 1;
+  color: currentColor;
+}
+
+.app-svg-icon > svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
