@@ -1,4 +1,4 @@
-name: Docker Image
+name: CI/CD
 
 on:
   push:
@@ -45,6 +45,7 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,5 +66,49 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ github.event_name == 'push' }}
+          push: true
           tags: ghcr.io/x-happy-x/sub-mirror:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -euo pipefail
+            REMOTE_DIR="${{ secrets.REMOTE_DIR }}"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+
+            mkdir -p "${REMOTE_DIR}"
+            cd "${REMOTE_DIR}"
+
+            if [ ! -d .git ]; then
+              git clone "${REPO_URL}" .
+            fi
+
+            git fetch --all --prune
+            git checkout "${{ github.ref_name }}"
+            git reset --hard "${{ github.sha }}"
+
+            docker login ghcr.io -u "${{ secrets.GHCR_USER }}" -p "${{ secrets.GHCR_TOKEN }}"
+            docker compose pull
+            docker compose up -d
+
+            for i in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:25500/health >/dev/null 2>&1; then
+                echo "[OK] health endpoint is up"
+                exit 0
+              fi
+              sleep 2
+            done
+
+            echo "[ERR] healthcheck failed" >&2
+            docker compose ps >&2 || true
+            docker compose logs --tail 120 >&2 || true
+            exit 1
