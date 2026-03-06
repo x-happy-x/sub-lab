@@ -70,6 +70,52 @@ function runMigrations(db) {
       updated_at TEXT NOT NULL
     );
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS short_link_user_policy (
+      short_link_id TEXT PRIMARY KEY,
+      max_users INTEGER NOT NULL DEFAULT 0,
+      blocked_message TEXT NOT NULL DEFAULT '',
+      limit_message TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS short_link_users (
+      short_link_id TEXT NOT NULL,
+      hwid TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      blocked INTEGER NOT NULL DEFAULT 0,
+      block_reason TEXT NOT NULL DEFAULT '',
+      last_ip TEXT NOT NULL DEFAULT '',
+      last_user_agent TEXT NOT NULL DEFAULT '',
+      last_device_model TEXT NOT NULL DEFAULT '',
+      last_device_os TEXT NOT NULL DEFAULT '',
+      last_app TEXT NOT NULL DEFAULT '',
+      last_device TEXT NOT NULL DEFAULT '',
+      last_accept_language TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (short_link_id, hwid)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS short_link_user_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      short_link_id TEXT NOT NULL,
+      hwid TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      changed_at TEXT NOT NULL,
+      ip TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      device_model TEXT NOT NULL DEFAULT '',
+      device_os TEXT NOT NULL DEFAULT '',
+      app TEXT NOT NULL DEFAULT '',
+      device TEXT NOT NULL DEFAULT '',
+      accept_language TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  db.run("CREATE INDEX IF NOT EXISTS idx_short_link_users_short_link ON short_link_users (short_link_id)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_short_link_users_last_seen ON short_link_users (short_link_id, last_seen_at DESC)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_short_link_user_history_lookup ON short_link_user_history (short_link_id, hwid, changed_at DESC)");
 
   const infoStmt = db.prepare("PRAGMA table_info(auth_sessions)");
   const columns = new Set();
@@ -107,6 +153,12 @@ function nowSec() {
 
 function normalizeUsername(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function normalizeHwid(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw.slice(0, 256);
 }
 
 function normalizeRole(value) {
@@ -526,6 +578,387 @@ async function setFavoritesRow(accountKey, favorites) {
   return list;
 }
 
+function defaultShortLinkPolicy() {
+  return {
+    maxUsers: 0,
+    blockedMessage: "Доступ к подписке заблокирован",
+    limitMessage: "Достигнут лимит пользователей для этой подписки",
+    updatedAt: "",
+  };
+}
+
+function normalizeShortLinkPolicy(input) {
+  const maxRaw = Number(input?.maxUsers ?? input?.max_users ?? 0);
+  const maxUsers = Number.isFinite(maxRaw) ? Math.max(0, Math.floor(maxRaw)) : 0;
+  const blockedMessage = String(input?.blockedMessage ?? input?.blocked_message ?? "").trim();
+  const limitMessage = String(input?.limitMessage ?? input?.limit_message ?? "").trim();
+  return {
+    maxUsers,
+    blockedMessage,
+    limitMessage,
+  };
+}
+
+function mapUserInfo(input) {
+  return {
+    ip: String(input?.ip || "").trim().slice(0, 128),
+    userAgent: String(input?.userAgent || "").trim().slice(0, 512),
+    deviceModel: String(input?.deviceModel || "").trim().slice(0, 256),
+    deviceOs: String(input?.deviceOs || "").trim().slice(0, 128),
+    app: String(input?.app || "").trim().slice(0, 128),
+    device: String(input?.device || "").trim().slice(0, 128),
+    acceptLanguage: String(input?.acceptLanguage || "").trim().slice(0, 128),
+  };
+}
+
+function getShortLinkUserPolicyRow(db, shortLinkId) {
+  const stmt = db.prepare(`
+    SELECT short_link_id, max_users, blocked_message, limit_message, updated_at
+    FROM short_link_user_policy
+    WHERE short_link_id = ?
+    LIMIT 1
+  `);
+  stmt.bind([String(shortLinkId || "")]);
+  const row = rowFromStmt(stmt);
+  stmt.free();
+  if (!row) return null;
+  return {
+    shortLinkId: String(row.short_link_id || ""),
+    maxUsers: Math.max(0, Number(row.max_users || 0)),
+    blockedMessage: String(row.blocked_message || ""),
+    limitMessage: String(row.limit_message || ""),
+    updatedAt: String(row.updated_at || ""),
+  };
+}
+
+function upsertShortLinkUserPolicyRow(db, shortLinkId, policyPatch = {}) {
+  const id = String(shortLinkId || "").trim();
+  if (!id) throw new Error("short link id is required");
+  const current = getShortLinkUserPolicyRow(db, id);
+  const defaults = defaultShortLinkPolicy();
+  const patch = normalizeShortLinkPolicy(policyPatch);
+  const next = {
+    maxUsers: patch.maxUsers,
+    blockedMessage: patch.blockedMessage || current?.blockedMessage || defaults.blockedMessage,
+    limitMessage: patch.limitMessage || current?.limitMessage || defaults.limitMessage,
+  };
+  const ts = nowIso();
+  const stmt = db.prepare(`
+    INSERT INTO short_link_user_policy (short_link_id, max_users, blocked_message, limit_message, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(short_link_id) DO UPDATE SET
+      max_users = excluded.max_users,
+      blocked_message = excluded.blocked_message,
+      limit_message = excluded.limit_message,
+      updated_at = excluded.updated_at
+  `);
+  stmt.run([id, next.maxUsers, next.blockedMessage, next.limitMessage, ts]);
+  stmt.free();
+  return {
+    shortLinkId: id,
+    maxUsers: next.maxUsers,
+    blockedMessage: next.blockedMessage,
+    limitMessage: next.limitMessage,
+    updatedAt: ts,
+  };
+}
+
+function getShortLinkUserRow(db, shortLinkId, hwid) {
+  const stmt = db.prepare(`
+    SELECT short_link_id, hwid, first_seen_at, last_seen_at, blocked, block_reason,
+           last_ip, last_user_agent, last_device_model, last_device_os, last_app, last_device, last_accept_language
+    FROM short_link_users
+    WHERE short_link_id = ? AND hwid = ?
+    LIMIT 1
+  `);
+  stmt.bind([String(shortLinkId || ""), normalizeHwid(hwid)]);
+  const row = rowFromStmt(stmt);
+  stmt.free();
+  return row || null;
+}
+
+function insertShortLinkUserHistory(db, shortLinkId, hwid, eventType, info, changedAt = nowIso()) {
+  const data = mapUserInfo(info);
+  const stmt = db.prepare(`
+    INSERT INTO short_link_user_history (
+      short_link_id, hwid, event_type, changed_at,
+      ip, user_agent, device_model, device_os, app, device, accept_language
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run([
+    String(shortLinkId || ""),
+    normalizeHwid(hwid),
+    String(eventType || "change"),
+    String(changedAt || nowIso()),
+    data.ip,
+    data.userAgent,
+    data.deviceModel,
+    data.deviceOs,
+    data.app,
+    data.device,
+    data.acceptLanguage,
+  ]);
+  stmt.free();
+}
+
+function hasTrackedUserInfoChange(row, info) {
+  const next = mapUserInfo(info);
+  return (
+    String(row?.last_ip || "") !== next.ip ||
+    String(row?.last_user_agent || "") !== next.userAgent ||
+    String(row?.last_device_model || "") !== next.deviceModel ||
+    String(row?.last_device_os || "") !== next.deviceOs ||
+    String(row?.last_app || "") !== next.app ||
+    String(row?.last_device || "") !== next.device ||
+    String(row?.last_accept_language || "") !== next.acceptLanguage
+  );
+}
+
+async function recordShortLinkUserVisit(shortLinkId, hwid, info) {
+  const db = await getDb();
+  const id = String(shortLinkId || "").trim();
+  if (!id) throw new Error("short link id is required");
+  const normalizedHwid = normalizeHwid(hwid);
+  if (!normalizedHwid) {
+    return { ok: true, skipped: true, reason: "empty hwid" };
+  }
+  const policy = getShortLinkUserPolicyRow(db, id) || {
+    shortLinkId: id,
+    ...defaultShortLinkPolicy(),
+  };
+  const userInfo = mapUserInfo(info);
+  const now = nowIso();
+  const existing = getShortLinkUserRow(db, id, normalizedHwid);
+
+  if (existing) {
+    const changed = hasTrackedUserInfoChange(existing, userInfo);
+    if (changed) {
+      insertShortLinkUserHistory(db, id, normalizedHwid, "changed", userInfo, now);
+    }
+    const stmt = db.prepare(`
+      UPDATE short_link_users
+      SET last_seen_at = ?,
+          last_ip = ?,
+          last_user_agent = ?,
+          last_device_model = ?,
+          last_device_os = ?,
+          last_app = ?,
+          last_device = ?,
+          last_accept_language = ?
+      WHERE short_link_id = ? AND hwid = ?
+    `);
+    stmt.run([
+      now,
+      userInfo.ip,
+      userInfo.userAgent,
+      userInfo.deviceModel,
+      userInfo.deviceOs,
+      userInfo.app,
+      userInfo.device,
+      userInfo.acceptLanguage,
+      id,
+      normalizedHwid,
+    ]);
+    stmt.free();
+    saveDb(db);
+
+    if (Number(existing.blocked || 0) > 0) {
+      return {
+        ok: false,
+        code: "blocked",
+        message: String(existing.block_reason || policy.blockedMessage || defaultShortLinkPolicy().blockedMessage),
+      };
+    }
+    return { ok: true, code: "ok" };
+  }
+
+  if (policy.maxUsers > 0) {
+    const countStmt = db.prepare(`
+      SELECT COUNT(1) AS c
+      FROM short_link_users
+      WHERE short_link_id = ? AND blocked = 0
+    `);
+    countStmt.bind([id]);
+    const row = rowFromStmt(countStmt);
+    countStmt.free();
+    const activeUsers = Math.max(0, Number(row?.c || 0));
+    if (activeUsers >= policy.maxUsers) {
+      return {
+        ok: false,
+        code: "limit",
+        message: String(policy.limitMessage || defaultShortLinkPolicy().limitMessage),
+      };
+    }
+  }
+
+  const insertStmt = db.prepare(`
+    INSERT INTO short_link_users (
+      short_link_id, hwid, first_seen_at, last_seen_at, blocked, block_reason,
+      last_ip, last_user_agent, last_device_model, last_device_os, last_app, last_device, last_accept_language
+    )
+    VALUES (?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertStmt.run([
+    id,
+    normalizedHwid,
+    now,
+    now,
+    userInfo.ip,
+    userInfo.userAgent,
+    userInfo.deviceModel,
+    userInfo.deviceOs,
+    userInfo.app,
+    userInfo.device,
+    userInfo.acceptLanguage,
+  ]);
+  insertStmt.free();
+  insertShortLinkUserHistory(db, id, normalizedHwid, "first_seen", userInfo, now);
+  saveDb(db);
+  return { ok: true, code: "ok" };
+}
+
+async function listShortLinkUsers(shortLinkId) {
+  const db = await getDb();
+  const id = String(shortLinkId || "").trim();
+  if (!id) throw new Error("short link id is required");
+  const policy = getShortLinkUserPolicyRow(db, id) || {
+    shortLinkId: id,
+    ...defaultShortLinkPolicy(),
+  };
+
+  const usersStmt = db.prepare(`
+    SELECT short_link_id, hwid, first_seen_at, last_seen_at, blocked, block_reason,
+           last_ip, last_user_agent, last_device_model, last_device_os, last_app, last_device, last_accept_language
+    FROM short_link_users
+    WHERE short_link_id = ?
+    ORDER BY last_seen_at DESC
+  `);
+  usersStmt.bind([id]);
+  const users = [];
+  while (usersStmt.step()) {
+    const row = usersStmt.getAsObject();
+    users.push({
+      hwid: String(row.hwid || ""),
+      firstSeenAt: String(row.first_seen_at || ""),
+      lastSeenAt: String(row.last_seen_at || ""),
+      blocked: Number(row.blocked || 0) > 0,
+      blockReason: String(row.block_reason || ""),
+      lastSeen: {
+        ip: String(row.last_ip || ""),
+        userAgent: String(row.last_user_agent || ""),
+        deviceModel: String(row.last_device_model || ""),
+        deviceOs: String(row.last_device_os || ""),
+        app: String(row.last_app || ""),
+        device: String(row.last_device || ""),
+        acceptLanguage: String(row.last_accept_language || ""),
+      },
+      history: [],
+    });
+  }
+  usersStmt.free();
+
+  const historyStmt = db.prepare(`
+    SELECT hwid, event_type, changed_at, ip, user_agent, device_model, device_os, app, device, accept_language
+    FROM short_link_user_history
+    WHERE short_link_id = ?
+    ORDER BY changed_at DESC, id DESC
+  `);
+  historyStmt.bind([id]);
+  const historyByHwid = new Map();
+  while (historyStmt.step()) {
+    const row = historyStmt.getAsObject();
+    const hwidValue = String(row.hwid || "");
+    if (!historyByHwid.has(hwidValue)) historyByHwid.set(hwidValue, []);
+    historyByHwid.get(hwidValue).push({
+      eventType: String(row.event_type || "changed"),
+      changedAt: String(row.changed_at || ""),
+      ip: String(row.ip || ""),
+      userAgent: String(row.user_agent || ""),
+      deviceModel: String(row.device_model || ""),
+      deviceOs: String(row.device_os || ""),
+      app: String(row.app || ""),
+      device: String(row.device || ""),
+      acceptLanguage: String(row.accept_language || ""),
+    });
+  }
+  historyStmt.free();
+
+  for (const item of users) {
+    item.history = historyByHwid.get(item.hwid) || [];
+  }
+
+  const blockedCount = users.filter((x) => x.blocked).length;
+  return {
+    shortLinkId: id,
+    policy: {
+      maxUsers: policy.maxUsers,
+      blockedMessage: policy.blockedMessage || defaultShortLinkPolicy().blockedMessage,
+      limitMessage: policy.limitMessage || defaultShortLinkPolicy().limitMessage,
+      updatedAt: policy.updatedAt || "",
+    },
+    summary: {
+      usersCount: users.length,
+      blockedCount,
+      activeCount: users.length - blockedCount,
+    },
+    users,
+  };
+}
+
+async function updateShortLinkUserPolicy(shortLinkId, policyPatch) {
+  const db = await getDb();
+  const row = upsertShortLinkUserPolicyRow(db, shortLinkId, policyPatch);
+  saveDb(db);
+  return {
+    shortLinkId: row.shortLinkId,
+    maxUsers: row.maxUsers,
+    blockedMessage: row.blockedMessage,
+    limitMessage: row.limitMessage,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function setShortLinkUserBlocked(shortLinkId, hwid, blocked, blockReason = "") {
+  const db = await getDb();
+  const id = String(shortLinkId || "").trim();
+  const normalizedHwid = normalizeHwid(hwid);
+  if (!id || !normalizedHwid) throw new Error("invalid short link id or hwid");
+  const existing = getShortLinkUserRow(db, id, normalizedHwid);
+  if (!existing) return null;
+  const nextBlocked = blocked ? 1 : 0;
+  const reason = blocked ? String(blockReason || "").trim().slice(0, 500) : "";
+  const stmt = db.prepare(`
+    UPDATE short_link_users
+    SET blocked = ?, block_reason = ?
+    WHERE short_link_id = ? AND hwid = ?
+  `);
+  stmt.run([nextBlocked, reason, id, normalizedHwid]);
+  stmt.free();
+  saveDb(db);
+  return {
+    shortLinkId: id,
+    hwid: normalizedHwid,
+    blocked: nextBlocked > 0,
+    blockReason: reason,
+  };
+}
+
+async function deleteShortLinkUser(shortLinkId, hwid) {
+  const db = await getDb();
+  const id = String(shortLinkId || "").trim();
+  const normalizedHwid = normalizeHwid(hwid);
+  if (!id || !normalizedHwid) throw new Error("invalid short link id or hwid");
+  const userStmt = db.prepare("DELETE FROM short_link_users WHERE short_link_id = ? AND hwid = ?");
+  userStmt.run([id, normalizedHwid]);
+  userStmt.free();
+  const historyStmt = db.prepare("DELETE FROM short_link_user_history WHERE short_link_id = ? AND hwid = ?");
+  historyStmt.run([id, normalizedHwid]);
+  historyStmt.free();
+  saveDb(db);
+  return true;
+}
+
 export {
   createShortLinkRow,
   getShortLinkRow,
@@ -542,4 +975,9 @@ export {
   deleteUser,
   getFavoritesRow,
   setFavoritesRow,
+  recordShortLinkUserVisit,
+  listShortLinkUsers,
+  updateShortLinkUserPolicy,
+  setShortLinkUserBlocked,
+  deleteShortLinkUser,
 };

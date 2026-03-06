@@ -18,6 +18,7 @@
 - `node --test app/server.test.js` runs server/unit tests.
 - `node app/server.js` runs HTTP service locally (Node 18+; expects env vars).
 - GitHub Actions workflow: `.github/workflows/docker-image.yml` runs tests + frontend build, then docker build; image push happens on `push` events only.
+- Deployment rule for this repo: after each user-requested code/UI change, run deploy immediately via `./deploy.sh` unless the user explicitly says not to deploy.
 
 ## Coding Style & Naming Conventions
 - JavaScript is written as ES modules (`import ... from`).

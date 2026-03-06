@@ -85,3 +85,49 @@ export type AuthUser = {
   username: string;
   role: "user" | "admin";
 };
+
+export type ShortLinkUserHistoryEntry = {
+  eventType: string;
+  changedAt: string;
+  ip: string;
+  userAgent: string;
+  deviceModel: string;
+  deviceOs: string;
+  app: string;
+  device: string;
+  acceptLanguage: string;
+};
+
+export type ShortLinkUserItem = {
+  hwid: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  blocked: boolean;
+  blockReason: string;
+  lastSeen: {
+    ip: string;
+    userAgent: string;
+    deviceModel: string;
+    deviceOs: string;
+    app: string;
+    device: string;
+    acceptLanguage: string;
+  };
+  history: ShortLinkUserHistoryEntry[];
+};
+
+export type ShortLinkUsersData = {
+  shortLinkId: string;
+  policy: {
+    maxUsers: number;
+    blockedMessage: string;
+    limitMessage: string;
+    updatedAt: string;
+  };
+  summary: {
+    usersCount: number;
+    blockedCount: number;
+    activeCount: number;
+  };
+  users: ShortLinkUserItem[];
+};

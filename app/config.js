@@ -7,12 +7,13 @@ const OUTPUT_DEFAULT_ENV = (process.env.OUTPUT || "").trim().toLowerCase();
 const CONVERTER_URL = process.env.CONVERTER_URL || "";
 const SOURCE_URL = process.env.SOURCE_URL || "http://web/source.txt";
 const PORT = Number(process.env.PORT || "8787");
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
 const PROFILE_DIR_ENV = process.env.PROFILE_DIR || "";
 const PROFILE_FALLBACK_DIR = path.resolve(process.cwd(), "resources/profiles");
 const PROFILE_ROOT_DIRS = PROFILE_DIR_ENV
   ? ["/data/profiles", PROFILE_DIR_ENV]
   : ["/data/profiles", PROFILE_FALLBACK_DIR];
-const HEADER_POLICY_DEFAULT = "prefer_request";
+const HEADER_POLICY_DEFAULT = "file_only";
 const OUTPUT_RAW = "raw";
 const OUTPUT_CLASH = "clash";
 
@@ -47,6 +48,7 @@ export {
   CONVERTER_URL,
   SOURCE_URL,
   PORT,
+  PUBLIC_BASE_URL,
   PROFILE_ROOT_DIRS,
   HEADER_POLICY_DEFAULT,
   OUTPUT_RAW,

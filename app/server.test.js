@@ -28,7 +28,7 @@ test("base profiles are loaded from profiles directory", () => {
 test("ua profile selection prefers app+device and falls back to ua-default", () => {
   const specific = pickUserAgentProfile("flclashx", "android");
   assert.equal(specific.ok, true);
-  assert.equal(specific.headers["user-agent"], "FlClash X/0.8.74 (Android 14)");
+  assert.equal(specific.headers["user-agent"], "FlClash X/0.3.2 Platform/android");
 
   const fallback = pickUserAgentProfile("unknown-app", "android");
   assert.equal(fallback.ok, true);
@@ -44,7 +44,7 @@ test("request config merges base and auto ua profiles with output alias", () => 
   assert.equal(result.output, "clash");
   assert.deepEqual(result.profileNames, ["xiaomi"]);
   assert.equal(result.forwardHeaders["x-device-os"], "Android");
-  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.8.74 (Android 14)");
+  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.3.2 Platform/android");
 });
 
 test("ua profile headers are locked and cannot be overridden by request headers", () => {
@@ -54,7 +54,7 @@ test("ua profile headers are locked and cannot be overridden by request headers"
     "x-user-agent": "BadUA/9.9.9",
   });
   assert.equal(result.ok, true);
-  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.8.74 (Android 14)");
+  assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.3.2 Platform/android");
 });
 
 test("produceOutput returns expected content types for raw and clash", async () => {

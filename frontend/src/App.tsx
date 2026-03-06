@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ComponentProps } from "react";
-import type { AuthUser, FavoriteItem, MockSource, ProfileCatalog, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
+import type { AuthUser, FavoriteItem, MockSource, ProfileCatalog, ShortLinkUsersData, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
 import { readFavorites, writeFavorites } from "./lib/storage";
 import {
   clearMockLogs,
@@ -23,6 +23,10 @@ import {
   login,
   logout,
   fetchAuthState,
+  fetchShortLinkUsers,
+  updateShortLinkUsersPolicy,
+  updateShortLinkUserState,
+  deleteShortLinkUserEntry,
   readProfile,
   runSubTest,
   saveFavorites as saveFavoritesRemote,
@@ -130,7 +134,7 @@ function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPa
   }
 }
 
-function buildFullUrl(payload: SubscriptionPayload): string {
+function buildFullUrlWithOrigin(payload: SubscriptionPayload, origin: string): string {
   const endpoint = payload.endpoint === "sub" ? "sub" : "last";
   const params = new URLSearchParams();
   const keys: Array<keyof SubscriptionPayload> = ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"];
@@ -139,7 +143,18 @@ function buildFullUrl(payload: SubscriptionPayload): string {
     if (v) params.set(key, String(v));
   }
   if (!params.get("output")) params.set("output", "yml");
-  return `${window.location.origin}/${endpoint}?${params.toString()}`;
+  return `${origin}/${endpoint}?${params.toString()}`;
+}
+
+function normalizePublicBaseUrl(raw: string): string {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "";
+  }
 }
 
 type ProfileHeaderRow = {
@@ -256,7 +271,7 @@ function generateHwidByOs(os: string): string {
 }
 
 export default function App() {
-  type ModalKind = "import" | "composer" | "tester" | "mock" | "profileEditor" | "share";
+  type ModalKind = "import" | "composer" | "tester" | "mock" | "profileEditor" | "share" | "subUsers";
   const [theme, setTheme] = useState<"claude" | "claude-dark">(() => {
     const saved = localStorage.getItem("submirror-theme");
     if (saved === "claude" || saved === "claude-dark") return saved;
@@ -287,7 +302,15 @@ export default function App() {
   const [showMock, setShowMock] = useState(false);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [showShare, setShowShare] = useState(false);
+  const [showSubUsers, setShowSubUsers] = useState(false);
   const [shareItem, setShareItem] = useState<FavoriteItem | null>(null);
+  const [subUsersItem, setSubUsersItem] = useState<FavoriteItem | null>(null);
+  const [subUsersData, setSubUsersData] = useState<ShortLinkUsersData | null>(null);
+  const [subUsersLoading, setSubUsersLoading] = useState(false);
+  const [subUsersMax, setSubUsersMax] = useState("0");
+  const [subUsersBlockedMessage, setSubUsersBlockedMessage] = useState("");
+  const [subUsersLimitMessage, setSubUsersLimitMessage] = useState("");
+  const [subUsersExpandedHwid, setSubUsersExpandedHwid] = useState("");
   const [shareModalMeta, setShareModalMeta] = useState<PublicShortMeta | null>(null);
   const [shareModalMetaLoading, setShareModalMetaLoading] = useState(false);
   const [testResult, setTestResult] = useState<SubTestResponse | null>(null);
@@ -319,6 +342,8 @@ export default function App() {
   const [mockHeaders, setMockHeaders] = useState("{}");
   const [mockBody, setMockBody] = useState("");
   const [mockLogs, setMockLogs] = useState("");
+  const [mockTestTarget, setMockTestTarget] = useState("__current__");
+  const [publicBaseUrl, setPublicBaseUrl] = useState("");
 
   const notify = (level: NotificationLevel, message: string) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -335,10 +360,16 @@ export default function App() {
         setAuthEnabled(auth.enabled);
         setAuthenticated(auth.authenticated || !auth.enabled);
         setAuthUser(auth.user || null);
+        setPublicBaseUrl(normalizePublicBaseUrl(auth.publicBaseUrl));
       })
       .catch(() => {})
       .finally(() => setAuthResolved(true));
   }, []);
+
+  const effectiveOrigin = useMemo(() => {
+    const fromApi = normalizePublicBaseUrl(publicBaseUrl);
+    return fromApi || window.location.origin;
+  }, [publicBaseUrl]);
 
   useEffect(() => {
     if (!authResolved) return;
@@ -364,6 +395,7 @@ export default function App() {
   }, [authResolved, authEnabled, authenticated]);
 
   useEffect(() => {
+    if (!authResolved) return;
     if (authEnabled && !authenticated) return;
     void Promise.all([fetchProfileCatalog(), fetchUaCatalog(), fetchAppsCatalog()])
       .then(([profiles, ua, apps]) => {
@@ -376,7 +408,7 @@ export default function App() {
         setOrderByOs(apps.orderByOs);
       })
       .catch(() => {});
-  }, [authEnabled, authenticated]);
+  }, [authResolved, authEnabled, authenticated]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -392,7 +424,7 @@ export default function App() {
     : ((publicTypeOverrideRaw === "yml" || publicTypeOverrideRaw === "yaml" || publicTypeOverrideRaw === "clash") ? "yml" : "");
   const isAdminUser = authUser?.role === "admin";
   const isMainPath = !isAdminPath && !publicShareId;
-  const isAnyModalOpen = showImport || showComposer || showTester || showMock || showProfileEditor || showShare;
+  const isAnyModalOpen = showImport || showComposer || showTester || showMock || showProfileEditor || showShare || showSubUsers;
 
   const refreshAdminUsers = async () => {
     const list = await adminListUsers();
@@ -465,6 +497,7 @@ export default function App() {
     setShowMock(false);
     setShowProfileEditor(false);
     setShowShare(false);
+    setShowSubUsers(false);
   };
 
   const openModal = (kind: ModalKind) => {
@@ -475,6 +508,7 @@ export default function App() {
     if (kind === "mock") setShowMock(true);
     if (kind === "profileEditor") setShowProfileEditor(true);
     if (kind === "share") setShowShare(true);
+    if (kind === "subUsers") setShowSubUsers(true);
   };
 
   const resetComposer = () => {
@@ -619,7 +653,7 @@ export default function App() {
       headers: JSON.parse(mockHeaders || "{}"),
     });
     setMockId(source.id);
-    const url = `${window.location.origin}/mock/${source.id}`;
+    const url = `${effectiveOrigin}/mock/${source.id}`;
     setMockUrl(url);
     setPayload((prev) => ({ ...prev, sub_url: url }));
     await refreshMockLogs();
@@ -661,6 +695,36 @@ export default function App() {
     notify("info", "Логи очищены");
   };
 
+  const mockResolvedUrl = String(mockUrl || "").trim() || (mockId ? `${effectiveOrigin}/mock/${mockId}` : "");
+
+  const runMockSubscriptionTest = async () => {
+    if (!mockResolvedUrl) {
+      notify("warning", "Сначала создайте или загрузите mock-сервер");
+      return;
+    }
+    let basePayload: SubscriptionPayload = { ...payload };
+    if (mockTestTarget !== "__current__") {
+      const idx = Number(mockTestTarget || "-1");
+      if (!Number.isInteger(idx) || idx < 0 || idx >= favorites.length) {
+        notify("warning", "Выберите корректную подписку");
+        return;
+      }
+      const item = favorites[idx];
+      let p = item?.payload;
+      if ((!p || !p.sub_url) && item?.shortId) {
+        p = await fetchShortLink(item.shortId);
+      }
+      basePayload = { ...defaultPayload(), ...(p || {}) };
+    }
+    const testPayload: SubscriptionPayload = {
+      ...defaultPayload(),
+      ...basePayload,
+      sub_url: mockResolvedUrl,
+    };
+    setPayload(testPayload);
+    await runTester(testPayload);
+  };
+
   const loadProfileFile = async () => {
     if (!profileName) return;
     const content = await readProfile(profileName);
@@ -694,6 +758,83 @@ export default function App() {
     openModal("share");
   };
 
+  const openSubUsers = async (item: FavoriteItem) => {
+    if (!item.shortId) {
+      notify("warning", "Для этой подписки нет short id");
+      return;
+    }
+    setSubUsersItem(item);
+    setSubUsersData(null);
+    setSubUsersLoading(true);
+    setSubUsersExpandedHwid("");
+    openModal("subUsers");
+    try {
+      const data = await fetchShortLinkUsers(item.shortId);
+      setSubUsersData(data);
+      setSubUsersMax(String(data.policy.maxUsers || 0));
+      setSubUsersBlockedMessage(String(data.policy.blockedMessage || ""));
+      setSubUsersLimitMessage(String(data.policy.limitMessage || ""));
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось загрузить пользователей подписки");
+    } finally {
+      setSubUsersLoading(false);
+    }
+  };
+
+  const refreshSubUsers = async () => {
+    if (!subUsersItem?.shortId) return;
+    const data = await fetchShortLinkUsers(subUsersItem.shortId);
+    setSubUsersData(data);
+    setSubUsersMax(String(data.policy.maxUsers || 0));
+    setSubUsersBlockedMessage(String(data.policy.blockedMessage || ""));
+    setSubUsersLimitMessage(String(data.policy.limitMessage || ""));
+  };
+
+  const saveSubUsersPolicy = async () => {
+    if (!subUsersItem?.shortId) return;
+    try {
+      await updateShortLinkUsersPolicy(subUsersItem.shortId, {
+        maxUsers: Number(subUsersMax || "0"),
+        blockedMessage: subUsersBlockedMessage,
+        limitMessage: subUsersLimitMessage,
+      });
+      await refreshSubUsers();
+      notify("success", "Настройки ограничений сохранены");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось сохранить настройки");
+    }
+  };
+
+  const toggleSubUserBlocked = async (hwid: string, blocked: boolean, currentReason = "") => {
+    if (!subUsersItem?.shortId) return;
+    const reason = blocked
+      ? (window.prompt("Текст заглушки для блокировки этого пользователя", currentReason || subUsersBlockedMessage || "") || currentReason || "")
+      : "";
+    try {
+      await updateShortLinkUserState(subUsersItem.shortId, hwid, {
+        blocked,
+        blockReason: reason,
+      });
+      await refreshSubUsers();
+      notify("success", blocked ? "Пользователь заблокирован" : "Пользователь разблокирован");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось обновить состояние пользователя");
+    }
+  };
+
+  const removeSubUser = async (hwid: string) => {
+    if (!subUsersItem?.shortId) return;
+    const ok = window.confirm(`Удалить пользователя ${hwid} из списка?`);
+    if (!ok) return;
+    try {
+      await deleteShortLinkUserEntry(subUsersItem.shortId, hwid);
+      await refreshSubUsers();
+      notify("warning", "Пользователь удален");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось удалить пользователя");
+    }
+  };
+
   const buildAppShareLink = (app: string, link: string) => {
     const template = appShareLinks[String(app || "").toLowerCase()];
     if (!template) return "";
@@ -712,6 +853,7 @@ export default function App() {
       setAuthEnabled(auth.enabled);
       setAuthenticated(auth.authenticated || !auth.enabled);
       setAuthUser(auth.user || null);
+      setPublicBaseUrl(normalizePublicBaseUrl(auth.publicBaseUrl));
       if (auth.user?.role === "admin" && window.location.pathname === "/") {
         history.replaceState(null, "", "/admin");
       }
@@ -783,6 +925,28 @@ export default function App() {
     }
   };
 
+  const resetAdminUserPassword = async (username: string, role: "user" | "admin") => {
+    const nextPassword = adminEditPassword.trim();
+    if (!nextPassword) {
+      setStatus("Введите новый пароль в блоке «Пароль для операций»");
+      notify("warning", "Укажите пароль для сброса");
+      return;
+    }
+    try {
+      setStatus("");
+      await adminUpdateUser(username, {
+        role,
+        password: nextPassword,
+      });
+      setAdminEditPassword("");
+      await refreshAdminUsers();
+      notify("success", "Пароль обновлен");
+    } catch (e) {
+      setStatus((e as Error)?.message || "Не удалось обновить пароль");
+      notify("error", (e as Error)?.message || "Не удалось обновить пароль");
+    }
+  };
+
   const goAdmin = () => {
     history.replaceState(null, "", "/admin");
     window.location.reload();
@@ -791,6 +955,12 @@ export default function App() {
   const goMain = () => {
     history.replaceState(null, "", "/");
     window.location.reload();
+  };
+
+  const formatDateTime = (value: string) => {
+    const ts = Date.parse(String(value || ""));
+    if (!Number.isFinite(ts)) return "—";
+    return new Date(ts).toLocaleString();
   };
 
   const topRightControls = (
@@ -813,8 +983,88 @@ export default function App() {
     </div>
   );
 
+  const mockModalContent = (
+    <div className="mock-layout">
+      <section className="mock-section">
+        <h3 className="editor-heading">1. Подключение mock</h3>
+        <label className="composer-label">URL mock-сервера</label>
+        <div className="url-row">
+          <TextInput placeholder="http://.../mock/<id>" value={mockUrl} onChange={(e) => setMockUrl(e.target.value)} />
+          <TipButton tip="Загрузить конфигурацию mock по URL" className="btn" onClick={() => void loadMock()}>Загрузить</TipButton>
+        </div>
+        <div className="status">Текущий URL: {mockResolvedUrl || "не задан"}</div>
+      </section>
+
+      <section className="mock-section">
+        <h3 className="editor-heading">2. Конфигурация ответа</h3>
+        <div className="row">
+          <select value={mockPreset} onChange={(e) => setMockPreset(e.target.value)}>
+            <option value="stub_raw">stub_raw</option>
+            <option value="stub_clash">stub_clash</option>
+            <option value="no_subscriptions">no_subscriptions</option>
+            <option value="antibot_html">antibot_html</option>
+          </select>
+          <TextInput placeholder="status" value={mockStatus} onChange={(e) => setMockStatus(e.target.value)} />
+        </div>
+        <div className="row">
+          <TextInput placeholder="content-type" value={mockContentType} onChange={(e) => setMockContentType(e.target.value)} />
+          <TextInput placeholder="delay ms" value={mockDelayMs} onChange={(e) => setMockDelayMs(e.target.value)} />
+        </div>
+        <label className="composer-label">headers (JSON)</label>
+        <Textarea placeholder='{"x-debug":"demo"}' value={mockHeaders} onChange={(e) => setMockHeaders(e.target.value)} />
+        <label className="composer-label">body</label>
+        <Textarea placeholder="Тело ответа mock-сервера" value={mockBody} onChange={(e) => setMockBody(e.target.value)} />
+        <div className="toolbar">
+          <TipButton tip="Создать новый mock-сервер" className="btn" onClick={() => void createMock()}>Создать</TipButton>
+          <TipButton tip="Обновить текущий mock-сервер" className="btn" onClick={() => void updateMock()}>Обновить</TipButton>
+          <TipButton tip="Показать логи запросов mock-сервера" className="btn" onClick={() => void refreshMockLogs()}>Логи</TipButton>
+          <TipButton tip="Очистить логи mock-сервера" className="btn" onClick={() => void clearLogs()}>Очистить логи</TipButton>
+          <TipButton tip="Подставить mock URL в sub_url" tone="primary" className="btn" onClick={() => setPayload((p) => ({ ...p, sub_url: mockResolvedUrl }))}>Использовать в конструкторе</TipButton>
+        </div>
+      </section>
+
+      <section className="mock-section">
+        <h3 className="editor-heading">3. Тест подписки через mock</h3>
+        <label className="composer-label">Выберите подписку для теста</label>
+        <div className="row">
+          <select value={mockTestTarget} onChange={(e) => setMockTestTarget(e.target.value)}>
+            <option value="__current__">Текущая форма (конструктор)</option>
+            {favorites.map((item, idx) => (
+              <option key={`${item.shortId || item.title}-${idx}`} value={String(idx)}>
+                {item.title} [{item.payload.output || "yml"} | {item.payload.app || "-"} | {item.payload.device || "-"}]
+              </option>
+            ))}
+          </select>
+          <TipButton tip="Запустить тест выбранной подписки через mock-сервер" tone="primary" className="btn" onClick={() => void runMockSubscriptionTest()}>
+            Тест через mock
+          </TipButton>
+        </div>
+        <div className="toolbar">
+          <TipButton tip="Открыть полный тестер" className="btn" onClick={() => setShowTester(true)}>Открыть тестер</TipButton>
+          <TipIconButton tip="Копировать исходный ответ" aria-label="Копировать исходный ответ" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.upstream?.body || "")} />
+          <TipIconButton tip="Копировать результат конвертации" aria-label="Копировать результат конвертации" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.conversion?.body || "")} />
+        </div>
+        <div className="result-grid">
+          <div className="result">
+            <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
+            <select>{sourceServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
+          </div>
+          <div className="result">
+            <strong>После конвертации: {testResult?.conversion?.outputFormat || "-"}</strong>
+            <select>{convertedServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
+          </div>
+        </div>
+      </section>
+
+      <section className="mock-section">
+        <h3 className="editor-heading">Логи mock-сервера</h3>
+        <pre className="json">{mockLogs || "Логов пока нет"}</pre>
+      </section>
+    </div>
+  );
+
   if (publicShareId) {
-    const publicFullUrl = publicSharePayload ? buildFullUrl(publicSharePayload) : "";
+    const publicFullUrl = publicSharePayload ? buildFullUrlWithOrigin(publicSharePayload, effectiveOrigin) : "";
     return (
       <main className="page">
         {isAnyModalOpen ? null : topRightControls}
@@ -845,31 +1095,58 @@ export default function App() {
     );
   }
 
+  if (!authResolved) {
+    return (
+      <main className="page">
+        {isAnyModalOpen ? null : topRightControls}
+        <HeroHeader
+          logoSrc={subLabIcon}
+          subtitle="Проверка доступа"
+        />
+        <section className="auth-layout">
+          <article className="sub-card auth-card">
+            <h2>Проверка авторизации...</h2>
+            <p>Секунду, загружаем данные сессии.</p>
+          </article>
+        </section>
+        <NotificationToasts items={notifications} onDismiss={dismissNotification} />
+      </main>
+    );
+  }
+
   if (authEnabled && !authenticated) {
     return (
       <main className="page">
         {isAnyModalOpen ? null : topRightControls}
-        <section className="auth-screen">
-          <h1>SubLab</h1>
-          <p>Требуется авторизация</p>
-          <TextInput
-            type="text"
-            placeholder="Логин"
-            value={authUsername}
-            onChange={(e) => setAuthUsername(e.target.value)}
-          />
-          <TextInput
-            type="password"
-            placeholder="Пароль"
-            value={authPassword}
-            onChange={(e) => setAuthPassword(e.target.value)}
-          />
-          <div className="toolbar">
-            <TipButton tip="Войти" tone="primary" className="btn" onClick={() => void tryLogin()}>
-              Войти
-            </TipButton>
-          </div>
-          <div className="status">{authError}</div>
+        <HeroHeader
+          logoSrc={subLabIcon}
+          subtitle="Авторизация"
+        />
+        <section className="auth-layout">
+          <article className="sub-card auth-card">
+            <h2>Вход в SubLab</h2>
+            <p>Введите логин и пароль, чтобы открыть подписки и инструменты.</p>
+            <div className="auth-fields">
+              <TextInput
+                type="text"
+                placeholder="Логин"
+                value={authUsername}
+                onChange={(e) => setAuthUsername(e.target.value)}
+              />
+              <TextInput
+                type="password"
+                placeholder="Пароль"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+              />
+            </div>
+            <div className="toolbar auth-toolbar">
+              <TipButton tip="Войти" tone="primary" className="btn" onClick={() => void tryLogin()}>
+                Войти
+              </TipButton>
+            </div>
+            <div className="status auth-status">{authError || " "}</div>
+          </article>
         </section>
         <NotificationToasts items={notifications} onDismiss={dismissNotification} />
       </main>
@@ -905,37 +1182,76 @@ export default function App() {
           </div>
         </header>
 
-        <section className="admin-tools-grid">
-          <button type="button" className="admin-tool-card" onClick={() => openModal("mock")}>
-            <span className="admin-tool-icon"><FlaskIcon className="btn-icon" /></span>
-            <span className="admin-tool-title">Тестовый сервер</span>
-            <span className="admin-tool-text">Проверка источников, пресеты, логирование и отладка ответа.</span>
-          </button>
-          <button type="button" className="admin-tool-card" onClick={() => openModal("profileEditor")}>
-            <span className="admin-tool-icon"><ProfileIcon className="btn-icon" /></span>
-            <span className="admin-tool-title">Профили и UA</span>
-            <span className="admin-tool-text">Редактирование заголовков профилей и UA-каталога.</span>
-          </button>
+        <section className="admin-overview">
+          <article className="sub-card admin-metric-card">
+            <div className="admin-metric-label">Пользователи</div>
+            <div className="admin-metric-value">{adminUsers.length}</div>
+          </article>
+          <article className="sub-card admin-metric-card">
+            <div className="admin-metric-label">Администраторы</div>
+            <div className="admin-metric-value">{adminUsers.filter((u) => u.role === "admin").length}</div>
+          </article>
+          <article className="sub-card admin-metric-card">
+            <div className="admin-metric-label">Обычные пользователи</div>
+            <div className="admin-metric-value">{adminUsers.filter((u) => u.role === "user").length}</div>
+          </article>
         </section>
 
-        <section className="sub-card admin-form">
-          <h2>Создать пользователя</h2>
-          <div className="row">
-            <TextInput placeholder="username" value={adminNewUsername} onChange={(e) => setAdminNewUsername(e.target.value)} />
-            <TextInput type="password" placeholder="password" value={adminNewPassword} onChange={(e) => setAdminNewPassword(e.target.value)} />
-            <select value={adminNewRole} onChange={(e) => setAdminNewRole((e.target.value === "admin" ? "admin" : "user"))}>
-              <option value="user">user</option>
-              <option value="admin">admin</option>
-            </select>
-            <TipButton tip="Создать пользователя" tone="primary" className="btn" onClick={() => void createAdminUser()}>Создать</TipButton>
+        <section className="admin-section">
+          <div className="admin-section-head">
+            <h2>Инструменты</h2>
+            <p>Сервисные экраны для диагностики и настройки профилей.</p>
           </div>
-          <div className="status">{status}</div>
+          <div className="admin-tools-grid">
+            <button type="button" className="admin-tool-card" onClick={() => openModal("mock")}>
+              <span className="admin-tool-icon"><FlaskIcon className="btn-icon" /></span>
+              <span className="admin-tool-title">Тестовый сервер</span>
+              <span className="admin-tool-text">Проверка источников, пресеты, логирование и отладка ответа.</span>
+            </button>
+            <button type="button" className="admin-tool-card" onClick={() => openModal("profileEditor")}>
+              <span className="admin-tool-icon"><ProfileIcon className="btn-icon" /></span>
+              <span className="admin-tool-title">Профили и UA</span>
+              <span className="admin-tool-text">Редактирование заголовков профилей и UA-каталога.</span>
+            </button>
+          </div>
         </section>
 
-        <section className="cards">
+        <section className="admin-panel-grid">
+          <section className="sub-card admin-form">
+            <h2>Создать пользователя</h2>
+            <div className="row">
+              <TextInput placeholder="username" value={adminNewUsername} onChange={(e) => setAdminNewUsername(e.target.value)} />
+              <TextInput type="password" placeholder="password" value={adminNewPassword} onChange={(e) => setAdminNewPassword(e.target.value)} />
+              <select value={adminNewRole} onChange={(e) => setAdminNewRole((e.target.value === "admin" ? "admin" : "user"))}>
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+              </select>
+              <TipButton tip="Создать пользователя" tone="primary" className="btn" onClick={() => void createAdminUser()}>Создать</TipButton>
+            </div>
+          </section>
+
+          <section className="sub-card admin-form">
+            <h2>Пароль для операций</h2>
+            <p className="status">Используется кнопкой «Сбросить пароль». После успешной операции поле очищается.</p>
+            <TextInput
+              type="password"
+              placeholder="Новый пароль"
+              value={adminEditPassword}
+              onChange={(e) => setAdminEditPassword(e.target.value)}
+            />
+          </section>
+        </section>
+
+        <div className="status admin-status">{status}</div>
+
+        <section className="cards admin-users-list">
+          <div className="admin-section-head">
+            <h2>Пользователи</h2>
+            <p>Смена роли, сброс пароля и удаление аккаунтов.</p>
+          </div>
           {adminUsers.map((u) => (
-            <article key={u.username} className="sub-card">
-              <div className="sub-head">
+            <article key={u.username} className="sub-card admin-user-card">
+              <div className="sub-head admin-user-head">
                 <div>
                   <div className="sub-name">{u.username}</div>
                   <div className="labels">
@@ -943,66 +1259,47 @@ export default function App() {
                     {u.username === authUser?.username ? <span className="label">текущий аккаунт</span> : null}
                   </div>
                 </div>
-                <div className="toolbar">
-                  <TipButton
-                    tip={u.username === authUser?.username ? "Нельзя менять роль текущего пользователя" : "Сделать user"}
-                    className="btn"
-                    disabled={u.username === authUser?.username}
-                    onClick={() => void updateAdminUser(u.username, "user")}
-                  >
-                    user
-                  </TipButton>
-                  <TipButton
-                    tip={u.username === authUser?.username ? "Нельзя менять роль текущего пользователя" : "Сделать admin"}
-                    className="btn"
-                    disabled={u.username === authUser?.username}
-                    onClick={() => void updateAdminUser(u.username, "admin")}
-                  >
-                    admin
-                  </TipButton>
-                  <TipButton tip="Удалить пользователя" className="btn" onClick={() => void removeAdminUser(u.username)}>Удалить</TipButton>
-                </div>
+              </div>
+              <div className="admin-user-actions-grid">
+                <section className="admin-action-group">
+                  <div className="admin-action-title">Роль</div>
+                  <div className="toolbar">
+                    <TipButton
+                      tip={u.username === authUser?.username ? "Нельзя менять роль текущего пользователя" : "Сделать user"}
+                      className="btn"
+                      disabled={u.username === authUser?.username}
+                      onClick={() => void updateAdminUser(u.username, "user")}
+                    >
+                      Сделать user
+                    </TipButton>
+                    <TipButton
+                      tip={u.username === authUser?.username ? "Нельзя менять роль текущего пользователя" : "Сделать admin"}
+                      className="btn"
+                      disabled={u.username === authUser?.username}
+                      onClick={() => void updateAdminUser(u.username, "admin")}
+                    >
+                      Сделать admin
+                    </TipButton>
+                  </div>
+                </section>
+                <section className="admin-action-group">
+                  <div className="admin-action-title">Операции</div>
+                  <div className="toolbar">
+                    <TipButton tip="Сбросить пароль пользователя" className="btn" onClick={() => void resetAdminUserPassword(u.username, u.role)}>
+                      Сбросить пароль
+                    </TipButton>
+                    <TipButton tip="Удалить пользователя" className="btn" onClick={() => void removeAdminUser(u.username)}>Удалить</TipButton>
+                  </div>
+                </section>
               </div>
             </article>
           ))}
           {adminUsers.length === 0 ? <article className="sub-card">Пользователи не найдены</article> : null}
         </section>
 
-        <section className="sub-card admin-form">
-          <h2>Сброс пароля</h2>
-          <TextInput
-            type="password"
-            placeholder="Новый пароль для выбранной операции role"
-            value={adminEditPassword}
-            onChange={(e) => setAdminEditPassword(e.target.value)}
-          />
-        </section>
-
         {showMock ? (
           <Modal onClose={() => setShowMock(false)} title="Тестовый сервер" showCloseButton>
-            <TextInput placeholder="mock URL" value={mockUrl} onChange={(e) => setMockUrl(e.target.value)} />
-            <div className="row">
-              <select value={mockPreset} onChange={(e) => setMockPreset(e.target.value)}>
-                <option value="stub_raw">stub_raw</option>
-                <option value="stub_clash">stub_clash</option>
-                <option value="no_subscriptions">no_subscriptions</option>
-                <option value="antibot_html">antibot_html</option>
-              </select>
-              <TextInput placeholder="status" value={mockStatus} onChange={(e) => setMockStatus(e.target.value)} />
-            </div>
-            <TextInput placeholder="content-type" value={mockContentType} onChange={(e) => setMockContentType(e.target.value)} />
-            <TextInput placeholder="delay ms" value={mockDelayMs} onChange={(e) => setMockDelayMs(e.target.value)} />
-            <Textarea placeholder='headers json' value={mockHeaders} onChange={(e) => setMockHeaders(e.target.value)} />
-            <Textarea placeholder='body' value={mockBody} onChange={(e) => setMockBody(e.target.value)} />
-            <div className="toolbar">
-              <TipButton tip="Загрузить конфигурацию mock по URL" className="btn" onClick={() => void loadMock()}>Загрузить</TipButton>
-              <TipButton tip="Создать новый mock-сервер" className="btn" onClick={() => void createMock()}>Создать</TipButton>
-              <TipButton tip="Обновить текущий mock-сервер" className="btn" onClick={() => void updateMock()}>Обновить</TipButton>
-              <TipButton tip="Показать логи запросов mock-сервера" className="btn" onClick={() => void refreshMockLogs()}>Логи</TipButton>
-              <TipButton tip="Очистить логи mock-сервера" className="btn" onClick={() => void clearLogs()}>Очистить логи</TipButton>
-              <TipButton tip="Подставить mock URL в sub_url" tone="primary" className="btn" onClick={() => setPayload((p) => ({ ...p, sub_url: mockUrl || (mockId ? `${window.location.origin}/mock/${mockId}` : "") }))}>Использовать в sub_url</TipButton>
-            </div>
-            <pre className="json">{mockLogs || "Логов пока нет"}</pre>
+            {mockModalContent}
           </Modal>
         ) : null}
 
@@ -1140,6 +1437,7 @@ export default function App() {
               onDelete={() => onDelete(idx)}
               onTest={() => void applySavedToTester(true, String(idx))}
               onShare={() => openShare(item)}
+              onOpenUsers={() => void openSubUsers(item)}
             />
           ))
         )}
@@ -1262,29 +1560,7 @@ export default function App() {
 
       {showMock ? (
         <Modal onClose={() => setShowMock(false)} title="Тестовый сервер" showCloseButton>
-          <TextInput placeholder="mock URL" value={mockUrl} onChange={(e) => setMockUrl(e.target.value)} />
-          <div className="row">
-            <select value={mockPreset} onChange={(e) => setMockPreset(e.target.value)}>
-              <option value="stub_raw">stub_raw</option>
-              <option value="stub_clash">stub_clash</option>
-              <option value="no_subscriptions">no_subscriptions</option>
-              <option value="antibot_html">antibot_html</option>
-            </select>
-            <TextInput placeholder="status" value={mockStatus} onChange={(e) => setMockStatus(e.target.value)} />
-          </div>
-          <TextInput placeholder="content-type" value={mockContentType} onChange={(e) => setMockContentType(e.target.value)} />
-          <TextInput placeholder="delay ms" value={mockDelayMs} onChange={(e) => setMockDelayMs(e.target.value)} />
-          <Textarea placeholder='headers json' value={mockHeaders} onChange={(e) => setMockHeaders(e.target.value)} />
-          <Textarea placeholder='body' value={mockBody} onChange={(e) => setMockBody(e.target.value)} />
-          <div className="toolbar">
-            <TipButton tip="Загрузить конфигурацию mock по URL" className="btn" onClick={() => void loadMock()}>Загрузить</TipButton>
-            <TipButton tip="Создать новый mock-сервер" className="btn" onClick={() => void createMock()}>Создать</TipButton>
-            <TipButton tip="Обновить текущий mock-сервер" className="btn" onClick={() => void updateMock()}>Обновить</TipButton>
-            <TipButton tip="Показать логи запросов mock-сервера" className="btn" onClick={() => void refreshMockLogs()}>Логи</TipButton>
-            <TipButton tip="Очистить логи mock-сервера" className="btn" onClick={() => void clearLogs()}>Очистить логи</TipButton>
-            <TipButton tip="Подставить mock URL в sub_url" tone="primary" className="btn" onClick={() => setPayload((p) => ({ ...p, sub_url: mockUrl || (mockId ? `${window.location.origin}/mock/${mockId}` : "") }))}>Использовать в sub_url</TipButton>
-          </div>
-          <pre className="json">{mockLogs || "Логов пока нет"}</pre>
+          {mockModalContent}
         </Modal>
       ) : null}
 
@@ -1392,8 +1668,8 @@ export default function App() {
       {showShare && shareItem ? (
         <Modal onClose={() => setShowShare(false)} title={`Поделиться: ${shareItem.title}`} showCloseButton>
           <SharePanel
-            shortUrl={shareItem.url || buildFullUrl(shareItem.payload)}
-            fullUrl={buildFullUrl(shareItem.payload)}
+            shortUrl={shareItem.url || buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
+            fullUrl={buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
             shareApps={shareApps}
             recommendedByOs={recommendedByOs}
             orderByOs={orderByOs}
@@ -1406,6 +1682,113 @@ export default function App() {
             fetchGuide={fetchAppGuide}
             onCopy={(text) => { void copyToClipboard(text); }}
           />
+        </Modal>
+      ) : null}
+      {showSubUsers && subUsersItem ? (
+        <Modal onClose={() => setShowSubUsers(false)} title={`Пользователи: ${subUsersItem.title}`} showCloseButton>
+          <div className="sub-users-layout">
+            {subUsersLoading ? <div className="status">Загрузка...</div> : null}
+            {!subUsersLoading && subUsersData ? (
+              <>
+                <section className="sub-users-policy">
+                  <div className="sub-users-summary">
+                    <span className="label">Всего: {subUsersData.summary.usersCount}</span>
+                    <span className="label">Активных: {subUsersData.summary.activeCount}</span>
+                    <span className="label">Заблокировано: {subUsersData.summary.blockedCount}</span>
+                  </div>
+                  <div className="row">
+                    <TextInput
+                      placeholder="Лимит пользователей (0 = без лимита)"
+                      value={subUsersMax}
+                      onChange={(e) => setSubUsersMax(e.target.value)}
+                    />
+                    <TipButton tip="Сохранить настройки" className="btn" onClick={() => void saveSubUsersPolicy()}>
+                      Сохранить настройки
+                    </TipButton>
+                  </div>
+                  <label className="composer-label">Текст при блокировке пользователя</label>
+                  <TextInput
+                    placeholder="Доступ к подписке заблокирован"
+                    value={subUsersBlockedMessage}
+                    onChange={(e) => setSubUsersBlockedMessage(e.target.value)}
+                  />
+                  <label className="composer-label">Текст при превышении лимита пользователей</label>
+                  <TextInput
+                    placeholder="Достигнут лимит пользователей для этой подписки"
+                    value={subUsersLimitMessage}
+                    onChange={(e) => setSubUsersLimitMessage(e.target.value)}
+                  />
+                </section>
+
+                <section className="sub-users-list">
+                  {subUsersData.users.length === 0 ? <article className="sub-card">Пользователи еще не подключались.</article> : null}
+                  {subUsersData.users.map((user) => (
+                    <article key={user.hwid} className="sub-card sub-user-card">
+                      <div className="sub-head">
+                        <div>
+                          <div className="sub-name">{user.hwid}</div>
+                          <div className="labels">
+                            <span className="label">{user.blocked ? "blocked" : "active"}</span>
+                            {user.lastSeen.deviceModel ? <span className="label">{user.lastSeen.deviceModel}</span> : null}
+                            {user.lastSeen.app ? <span className="label">{user.lastSeen.app}</span> : null}
+                            {user.lastSeen.device ? <span className="label">{user.lastSeen.device}</span> : null}
+                          </div>
+                        </div>
+                        <div className="toolbar">
+                          <TipButton
+                            tip={user.blocked ? "Разблокировать пользователя" : "Заблокировать пользователя"}
+                            className="btn"
+                            onClick={() => void toggleSubUserBlocked(user.hwid, !user.blocked, user.blockReason)}
+                          >
+                            {user.blocked ? "Разблокировать" : "Блокировать"}
+                          </TipButton>
+                          <TipButton tip="Удалить пользователя и историю" className="btn" onClick={() => void removeSubUser(user.hwid)}>
+                            Удалить
+                          </TipButton>
+                        </div>
+                      </div>
+                      <div className="status">
+                        Первый запрос: {formatDateTime(user.firstSeenAt)} | Последний запрос: {formatDateTime(user.lastSeenAt)}
+                      </div>
+                      <div className="status">
+                        IP: {user.lastSeen.ip || "—"} | UA: {user.lastSeen.userAgent || "—"}
+                      </div>
+                      {user.blocked && user.blockReason ? (
+                        <div className="status">Текст блокировки: {user.blockReason}</div>
+                      ) : null}
+                      <div className="toolbar">
+                        <TipButton
+                          tip="Показать/скрыть историю изменений устройства"
+                          className="btn"
+                          onClick={() => setSubUsersExpandedHwid((prev) => (prev === user.hwid ? "" : user.hwid))}
+                        >
+                          {subUsersExpandedHwid === user.hwid ? "Скрыть историю" : "История изменений"}
+                        </TipButton>
+                      </div>
+                      {subUsersExpandedHwid === user.hwid ? (
+                        <div className="sub-user-history">
+                          {user.history.length === 0 ? <div className="status">История изменений отсутствует.</div> : null}
+                          {user.history.map((h, idx) => (
+                            <article key={`${h.changedAt}-${idx}`} className="sub-user-history-item">
+                              <div className="status">
+                                {formatDateTime(h.changedAt)} [{h.eventType}]
+                              </div>
+                              <div className="status">
+                                OS: {h.deviceOs || "—"} | Model: {h.deviceModel || "—"} | App: {h.app || "—"} | Device: {h.device || "—"}
+                              </div>
+                              <div className="status">
+                                IP: {h.ip || "—"} | UA: {h.userAgent || "—"} | Lang: {h.acceptLanguage || "—"}
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </section>
+              </>
+            ) : null}
+          </div>
         </Modal>
       ) : null}
       <NotificationToasts items={notifications} onDismiss={dismissNotification} />

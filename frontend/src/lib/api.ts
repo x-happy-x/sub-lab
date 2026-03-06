@@ -1,15 +1,16 @@
-import type { AuthUser, MockSource, ProfileCatalog, SubTestResponse, SubscriptionPayload, UACatalog } from "../types";
+import type { AuthUser, MockSource, ProfileCatalog, ShortLinkUsersData, SubTestResponse, SubscriptionPayload, UACatalog } from "../types";
 import type { FavoriteItem } from "../types";
 
 const PARAM_KEYS = ["sub_url", "endpoint", "output", "app", "device", "profile", "profiles", "hwid"] as const;
 
-export async function fetchAuthState(): Promise<{ enabled: boolean; authenticated: boolean; user: AuthUser | null }> {
+export async function fetchAuthState(): Promise<{ enabled: boolean; authenticated: boolean; user: AuthUser | null; publicBaseUrl: string }> {
   const resp = await fetch("/api/auth/me");
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "auth state failed");
   return {
     enabled: Boolean(json.auth?.enabled),
     authenticated: Boolean(json.auth?.authenticated),
+    publicBaseUrl: String(json.config?.publicBaseUrl || ""),
     user: json.auth?.user && typeof json.auth.user === "object"
       ? {
           username: String(json.auth.user.username || ""),
@@ -71,6 +72,48 @@ export async function fetchShortLink(id: string): Promise<SubscriptionPayload> {
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link fetch failed");
   return json.link.params as SubscriptionPayload;
+}
+
+export async function fetchShortLinkUsers(id: string): Promise<ShortLinkUsersData> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/users`);
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link users fetch failed");
+  return json.users as ShortLinkUsersData;
+}
+
+export async function updateShortLinkUsersPolicy(
+  id: string,
+  patch: { maxUsers?: number; blockedMessage?: string; limitMessage?: string },
+): Promise<void> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/users`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch || {}),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link users policy update failed");
+}
+
+export async function updateShortLinkUserState(
+  id: string,
+  hwid: string,
+  patch: { blocked: boolean; blockReason?: string },
+): Promise<void> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/users/${encodeURIComponent(hwid)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch || {}),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link user update failed");
+}
+
+export async function deleteShortLinkUserEntry(id: string, hwid: string): Promise<void> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/users/${encodeURIComponent(hwid)}`, {
+    method: "DELETE",
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link user delete failed");
 }
 
 export async function fetchPublicShortLink(id: string): Promise<{ id: string; shortUrl: string; payload: SubscriptionPayload }> {

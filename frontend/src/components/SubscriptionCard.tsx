@@ -8,13 +8,18 @@ type Props = {
   onDelete: () => void;
   onTest: () => void;
   onShare: () => void;
+  onOpenUsers: () => void;
 };
 
-export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare }: Props) {
+export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare, onOpenUsers }: Props) {
   return (
     <Card
       className="sub-card"
-      title={<div className="sub-name">{item.title}</div>}
+      title={(
+        <button type="button" className="sub-name sub-name-btn" onClick={onOpenUsers}>
+          {item.title}
+        </button>
+      )}
       actions={(
         <div className="toolbar">
           <Tooltip content="Тест">

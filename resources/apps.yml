@@ -13,7 +13,7 @@ apps:
   - key: flclashx
     label: FlClashX
     deeplink: "flclashx://install-config?url={url}"
-    platforms: [android, ios, linux, windows, macos]
+    platforms: [android, linux, windows, macos]
     formats: [yml]
 
   - key: v2raytun

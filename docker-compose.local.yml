@@ -8,7 +8,7 @@ services:
       - "0.0.0.0:25500:8788"
     volumes:
       - ./data:/data
-      - ./resources/profiles:/profiles:ro
+      - ./resources:/resources:ro
     environment:
       SUB_URL: ""
       OUTPUT: "clash"
@@ -17,6 +17,7 @@ services:
       CONVERTER_URL: "http://127.0.0.1:8787/sub"
       SOURCE_URL: "http://127.0.0.1:8788/source.txt"
       ADMIN_SEED_PATH: "/resources/admin.json"
-      PROFILE_DIR: "/profiles"
+      PROFILE_DIR: "/resources/profiles"
       APP_PORT: "8788"
       SUBCONVERTER_PORT: "8787"
+      PUBLIC_BASE_URL: "http://sublab.local"

@@ -11,3 +11,11 @@
   height: 100%;
   display: block;
 }
+
+.app-svg-icon > svg [fill]:not([fill="none"]) {
+  fill: currentColor !important;
+}
+
+.app-svg-icon > svg [stroke]:not([stroke="none"]) {
+  stroke: currentColor !important;
+}

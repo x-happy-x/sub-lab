@@ -7,6 +7,7 @@ import {
   AUTH_SESSION_TTL_SEC,
   CACHE_DIR,
   PORT,
+  PUBLIC_BASE_URL,
   STATIC_FILES,
   normalizeOutput,
 } from "./config.js";
@@ -32,6 +33,11 @@ import {
   deleteUser as deleteAuthUser,
   getFavoritesRow,
   setFavoritesRow,
+  recordShortLinkUserVisit,
+  listShortLinkUsers,
+  updateShortLinkUserPolicy,
+  setShortLinkUserBlocked,
+  deleteShortLinkUser,
 } from "./sqlite-store.js";
 import {
   createMockSource,
@@ -228,7 +234,7 @@ async function readJsonBody(req, maxBytes = 128 * 1024) {
 }
 
 function shortLinkPublicUrls(req, id, params) {
-  const origin = `http://${req.headers.host || "localhost"}`;
+  const origin = resolvePublicOrigin(req);
   const endpoint = params.endpoint === "sub" ? "sub" : "last";
   return {
     id,
@@ -236,6 +242,15 @@ function shortLinkPublicUrls(req, id, params) {
     editUrl: `${origin}/?sid=${id}`,
     resolvedUrl: `${origin}/${endpoint}?${buildQueryFromParams(params).toString()}`,
   };
+}
+
+function resolvePublicOrigin(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim() || "localhost";
+  const proto = forwardedProto === "https" ? "https" : "http";
+  return `${proto}://${host}`;
 }
 
 function sha1(value) {
@@ -427,6 +442,46 @@ function parseSubscriptionUserinfo(value) {
     if (k === "expire") out.expire = Math.max(0, n);
   }
   return out;
+}
+
+function firstHeaderString(value) {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? String(value[0] || "").trim() : "";
+  }
+  return String(value || "").trim();
+}
+
+function detectClientIp(req) {
+  const xff = firstHeaderString(req.headers["x-forwarded-for"]);
+  if (xff) return xff.split(",")[0].trim();
+  const xri = firstHeaderString(req.headers["x-real-ip"]);
+  if (xri) return xri;
+  return String(req.socket?.remoteAddress || "").trim();
+}
+
+function resolveRawRequestHwid(reqUrl, reqHeaders, shortParams) {
+  const fromQuery = String(reqUrl.searchParams.get("hwid") || "").trim();
+  const fromHeader = firstHeaderString(reqHeaders["x-hwid"]);
+  const fromShort = String(shortParams?.hwid || "").trim();
+  const value = fromQuery || fromHeader || fromShort;
+  return value.slice(0, 256);
+}
+
+function resolveRawClientInfo(req, reqUrl, shortParams) {
+  const headers = sanitizeHeaderMap(req.headers || {});
+  const hwid = resolveRawRequestHwid(reqUrl, req.headers || {}, shortParams);
+  return {
+    hwid,
+    info: {
+      ip: detectClientIp(req),
+      userAgent: firstHeaderString(req.headers["user-agent"]),
+      deviceModel: firstHeaderString(req.headers["x-device-model"]) || firstHeaderString(req.headers["sec-ch-ua-model"]),
+      deviceOs: firstHeaderString(req.headers["x-device-os"]) || firstHeaderString(req.headers["sec-ch-ua-platform"]),
+      app: String(reqUrl.searchParams.get("app") || shortParams?.app || headers["x-app"] || "").trim(),
+      device: String(reqUrl.searchParams.get("device") || shortParams?.device || headers["x-device"] || "").trim(),
+      acceptLanguage: firstHeaderString(req.headers["accept-language"]),
+    },
+  };
 }
 
 function humanBytes(bytes) {
@@ -631,6 +686,89 @@ async function handleGetShortLink(req, res, id) {
   });
 }
 
+async function handleGetShortLinkUsers(req, res, id) {
+  const found = await getShortLink(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  try {
+    const data = await listShortLinkUsers(found.link.id);
+    sendJson(res, 200, { ok: true, users: data });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e?.message || "failed to load short link users" });
+  }
+}
+
+async function handleUpdateShortLinkUsersPolicy(req, res, id) {
+  const found = await getShortLink(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  try {
+    const body = await readJsonBody(req);
+    const updated = await updateShortLinkUserPolicy(found.link.id, {
+      maxUsers: body?.maxUsers,
+      blockedMessage: body?.blockedMessage,
+      limitMessage: body?.limitMessage,
+    });
+    sendJson(res, 200, { ok: true, policy: updated });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to update policy" });
+  }
+}
+
+async function handleUpdateShortLinkUser(req, res, id, hwidToken) {
+  const found = await getShortLink(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  let hwid = "";
+  try {
+    hwid = decodeURIComponent(String(hwidToken || ""));
+  } catch {
+    hwid = String(hwidToken || "");
+  }
+  try {
+    const body = await readJsonBody(req);
+    const updated = await setShortLinkUserBlocked(
+      found.link.id,
+      hwid,
+      Boolean(body?.blocked),
+      String(body?.blockReason || ""),
+    );
+    if (!updated) {
+      sendJson(res, 404, { ok: false, error: "user not found" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, user: updated });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to update user" });
+  }
+}
+
+async function handleDeleteShortLinkUser(req, res, id, hwidToken) {
+  const found = await getShortLink(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  let hwid = "";
+  try {
+    hwid = decodeURIComponent(String(hwidToken || ""));
+  } catch {
+    hwid = String(hwidToken || "");
+  }
+  try {
+    await deleteShortLinkUser(found.link.id, hwid);
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to delete user" });
+  }
+}
+
 async function handlePublicShortLink(req, res, id) {
   const found = await getShortLink(id);
   if (!found.ok) {
@@ -753,6 +891,20 @@ async function handleShortLinkResolve(req, res, id) {
     res.end(found.error || "short link not found");
     return;
   }
+
+  try {
+    const reqUrl = new URL(req.url || "/", "http://localhost");
+    const client = resolveRawClientInfo(req, reqUrl, found.link.params || {});
+    const visit = await recordShortLinkUserVisit(found.link.id, client.hwid, client.info);
+    if (!visit.ok && (visit.code === "blocked" || visit.code === "limit")) {
+      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(String(visit.message || "Доступ к подписке ограничен"));
+      return;
+    }
+  } catch (e) {
+    console.error("[WARN] short-link user tracking failed:", e?.message || e);
+  }
+
   await incrementShortLinkHits(found.link.id);
 
   if (wantsHtmlSharePage(req)) {
@@ -784,7 +936,7 @@ async function handleShortLinkResolve(req, res, id) {
 }
 
 function mockSourcePublicUrls(req, id) {
-  const origin = `http://${req.headers.host || "localhost"}`;
+  const origin = resolvePublicOrigin(req);
   return {
     id,
     sourceUrl: `${origin}/mock/${id}`,
@@ -960,6 +1112,9 @@ async function handleAuthMe(req, res) {
   const state = await getAuthState(req);
   sendJson(res, 200, {
     ok: true,
+    config: {
+      publicBaseUrl: resolvePublicOrigin(req),
+    },
     auth: {
       enabled: state.enabled,
       authenticated: state.authenticated,
@@ -1124,6 +1279,8 @@ const server = http.createServer(async (req, res) => {
   const publicShortApiMatch = routePath.match(/^\/api\/public-short-links\/([A-Za-z0-9_-]+)$/);
   const publicShortMetaApiMatch = routePath.match(/^\/api\/public-short-links\/([A-Za-z0-9_-]+)\/meta$/);
   const shortApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)$/);
+  const shortUsersApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users$/);
+  const shortUserApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users\/([^/]+)$/);
   const mockApiMatch = routePath.match(/^\/api\/mock-sources\/([A-Za-z0-9_-]+)$/);
   const mockLogsMatch = routePath.match(/^\/api\/mock-sources\/([A-Za-z0-9_-]+)\/logs$/);
   const adminUserApiMatch = routePath.match(/^\/api\/admin\/users\/([a-zA-Z0-9._-]+)$/);
@@ -1274,6 +1431,26 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && shortApiMatch) {
     if (!(await requireApiAuth(req, res))) return;
     await handleGetShortLink(req, res, shortApiMatch[1]);
+    return;
+  }
+  if (req.method === "GET" && shortUsersApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handleGetShortLinkUsers(req, res, shortUsersApiMatch[1]);
+    return;
+  }
+  if (req.method === "PATCH" && shortUsersApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleUpdateShortLinkUsersPolicy(req, res, shortUsersApiMatch[1]);
+    return;
+  }
+  if (req.method === "PATCH" && shortUserApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleUpdateShortLinkUser(req, res, shortUserApiMatch[1], shortUserApiMatch[2]);
+    return;
+  }
+  if (req.method === "DELETE" && shortUserApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleDeleteShortLinkUser(req, res, shortUserApiMatch[1], shortUserApiMatch[2]);
     return;
   }
   if (req.method === "PUT" && shortApiMatch) {
