@@ -85,6 +85,39 @@ test("produceOutput converts clash yaml fixture to raw URI list", async () => {
   assert.ok(uriLines.length >= 4, "expected at least 4 raw URIs after yaml->raw conversion");
 });
 
+test("produceOutput converts JSON outbound bundle fixture to raw URI list", async () => {
+  const fixturePath = new URL("../data/sample/raw.json", import.meta.url);
+  const jsonInput = fs.readFileSync(fixturePath, "utf8");
+  const rawResult = await produceOutput(jsonInput, "raw");
+
+  assert.equal(rawResult.ok, true);
+  assert.equal(rawResult.contentType, "text/plain; charset=utf-8");
+  assert.equal(typeof rawResult.body, "string");
+  assert.match(rawResult.conversion, /json-fallback-raw|none-raw/);
+
+  const uriLines = rawResult.body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("vless://"));
+
+  assert.ok(uriLines.length >= 31, "expected vless URIs extracted from JSON outbounds");
+  assert.ok(uriLines.some((line) => line.includes("security=reality")), "expected reality params in extracted URIs");
+  assert.ok(uriLines.some((line) => line.includes("#%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%91%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9")), "expected encoded remarks in URI names");
+});
+
+test("produceOutput converts JSON outbound bundle fixture to clash yaml", async () => {
+  const fixturePath = new URL("../data/sample/raw.json", import.meta.url);
+  const jsonInput = fs.readFileSync(fixturePath, "utf8");
+  const clashResult = await produceOutput(jsonInput, "clash");
+
+  assert.equal(clashResult.ok, true);
+  assert.equal(clashResult.contentType, "text/yaml; charset=utf-8");
+  assert.equal(typeof clashResult.body, "string");
+  assert.match(clashResult.body, /^proxies:\s*$/m);
+  assert.match(clashResult.body, /type:\s*vless/);
+  assert.match(clashResult.body, /servername:\s*tradingview\.com/);
+});
+
 test("home page contains form, qr and app buttons", () => {
   const html = renderHomePage();
   assert.ok(html.includes("Sub Mirror"));

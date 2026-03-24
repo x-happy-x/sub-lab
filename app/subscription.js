@@ -43,13 +43,15 @@ function looksLikeUriListOrBase64(s) {
 
 function extractConvertibleSource(rawText) {
   const t = rawText.trim();
-  if (!t.startsWith("{") || !t.endsWith("}")) return rawText;
+  if ((!t.startsWith("{") || !t.endsWith("}")) && (!t.startsWith("[") || !t.endsWith("]"))) return rawText;
   try {
     const parsed = JSON.parse(t);
     const cryptoLink = parsed?.happ?.cryptoLink;
     if (typeof cryptoLink === "string" && cryptoLink.trim()) {
       return cryptoLink.trim();
     }
+    const outboundLinks = extractRawUrisFromJsonConfig(parsed);
+    if (outboundLinks) return outboundLinks;
   } catch {
     // ignore JSON parse errors; fall back to raw text
   }
@@ -118,6 +120,88 @@ function buildYaml(obj, indent = 0) {
       return `${pad}${key}: ${String(value)}`;
     })
     .join("\n");
+}
+
+function sanitizeNodeName(value, fallback = "node") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+function buildNodeName(baseName, outboundTag, totalOutbounds, outboundIndex) {
+  const base = sanitizeNodeName(baseName, "node");
+  const tag = sanitizeNodeName(outboundTag, "");
+  if (totalOutbounds <= 1) return base;
+  if (tag) return `${base} ${tag}`;
+  return `${base} ${outboundIndex + 1}`;
+}
+
+function appendSearchParamIfPresent(params, key, value) {
+  if (value === undefined || value === null) return;
+  const text = String(value).trim();
+  if (!text) return;
+  params.set(key, text);
+}
+
+function extractRawUrisFromJsonConfig(parsed) {
+  const configs = Array.isArray(parsed) ? parsed : [parsed];
+  const lines = [];
+
+  for (const [configIndex, config] of configs.entries()) {
+    if (!config || typeof config !== "object") continue;
+    const outbounds = Array.isArray(config.outbounds) ? config.outbounds : [];
+    const proxyOutbounds = outbounds.filter((outbound) => String(outbound?.protocol || "").toLowerCase() === "vless");
+    const totalOutbounds = proxyOutbounds.length;
+    const baseName = sanitizeNodeName(config.remarks, `node-${configIndex + 1}`);
+
+    for (const [outboundIndex, outbound] of proxyOutbounds.entries()) {
+      const vnext = outbound?.settings?.vnext?.[0];
+      const user = vnext?.users?.[0];
+      const address = String(vnext?.address || "").trim();
+      const uuid = String(user?.id || "").trim();
+      if (!address || !uuid) continue;
+
+      const port = Number(vnext?.port || 443);
+      const stream = outbound?.streamSettings || {};
+      const security = String(stream.security || "none").trim() || "none";
+      const network = String(stream.network || "tcp").trim() || "tcp";
+      const params = new URLSearchParams();
+      params.set("type", network);
+      params.set("security", security);
+
+      appendSearchParamIfPresent(params, "flow", user?.flow);
+      appendSearchParamIfPresent(params, "encryption", user?.encryption);
+
+      if (security === "reality") {
+        const reality = stream.realitySettings || {};
+        appendSearchParamIfPresent(params, "sni", reality.serverName);
+        appendSearchParamIfPresent(params, "fp", reality.fingerprint);
+        appendSearchParamIfPresent(params, "pbk", reality.publicKey);
+        appendSearchParamIfPresent(params, "sid", reality.shortId);
+      } else if (security === "tls" || security === "xtls") {
+        const tls = stream.tlsSettings || {};
+        appendSearchParamIfPresent(params, "sni", tls.serverName);
+        appendSearchParamIfPresent(params, "alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : tls.alpn);
+      }
+
+      if (network === "ws") {
+        const ws = stream.wsSettings || {};
+        appendSearchParamIfPresent(params, "path", ws.path);
+        appendSearchParamIfPresent(params, "host", ws.headers?.Host || ws.headers?.host);
+      } else if (network === "grpc") {
+        const grpc = stream.grpcSettings || {};
+        appendSearchParamIfPresent(params, "serviceName", grpc.serviceName);
+        appendSearchParamIfPresent(params, "authority", grpc.authority);
+        if (grpc.mode === true || grpc.mode === "gun") params.set("mode", "gun");
+      } else if (network === "tcp" && stream.tcpSettings?.header?.type) {
+        appendSearchParamIfPresent(params, "headerType", stream.tcpSettings.header.type);
+      }
+
+      const name = buildNodeName(baseName, outbound.tag, totalOutbounds, outboundIndex);
+      lines.push(`vless://${encodeURIComponent(uuid)}@${address}:${port}?${params.toString()}#${encodeURIComponent(name)}`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join("\n") : "";
 }
 
 function vlessToProxy(line) {
@@ -947,12 +1031,17 @@ async function produceOutput(rawText, output) {
   }
 
   if (output === OUTPUT_RAW) {
-    let out = rawText;
+    let out = extractConvertibleSource(rawText);
     let conversion = "none-raw";
 
-    if (looksLikeClashProviderYaml(rawText)) {
+    if (out !== rawText && looksLikeUriListOrBase64(out)) {
+      out = decodeBase64IfNeeded(out);
+      conversion = "json-fallback-raw";
+    }
+
+    if (looksLikeClashProviderYaml(out)) {
       try {
-        let converted = await convertViaSubconverterToRaw(rawText);
+        let converted = await convertViaSubconverterToRaw(out);
         if (looksLikeUriListOrBase64(converted)) {
           converted = decodeBase64IfNeeded(converted);
         }
@@ -960,7 +1049,7 @@ async function produceOutput(rawText, output) {
           out = converted;
           conversion = "subconverter-raw";
         } else {
-          const fallback = convertClashYamlToRawUris(rawText);
+          const fallback = convertClashYamlToRawUris(out);
           if (hasAnySubscriptions(fallback) && !looksLikeClashProviderYaml(fallback)) {
             out = fallback;
             conversion = "yaml-fallback-raw";
@@ -969,7 +1058,7 @@ async function produceOutput(rawText, output) {
           }
         }
       } catch (e) {
-        const fallback = convertClashYamlToRawUris(rawText);
+        const fallback = convertClashYamlToRawUris(out);
         if (hasAnySubscriptions(fallback) && !looksLikeClashProviderYaml(fallback)) {
           out = fallback;
           conversion = "yaml-fallback-raw";
@@ -997,8 +1086,12 @@ async function produceOutput(rawText, output) {
     if (looksLikeUriListOrBase64(convertible)) {
       convertible = decodeBase64IfNeeded(convertible);
     }
-    out = await convertViaSubconverter(convertible);
-    conversion = "subconverter";
+    try {
+      out = await convertViaSubconverter(convertible);
+      conversion = "subconverter";
+    } catch {
+      out = convertible;
+    }
 
     if (!looksLikeClashProviderYaml(out)) {
       const fallback = convertVlessListToClash(convertible);
