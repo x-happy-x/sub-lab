@@ -274,6 +274,44 @@ function convertVlessListToClash(text) {
   return yaml;
 }
 
+function wrapClashProviderForFlClash(yamlText) {
+  const text = String(yamlText || "").trim();
+  if (!looksLikeClashProviderYaml(text)) return text;
+
+  const proxyNames = parseClashProxyList(text)
+    .map((proxy) => sanitizeNodeName(proxy?.name, "proxy"))
+    .filter(Boolean);
+  if (proxyNames.length === 0) return text;
+
+  const proxyGroups = [
+    {
+      name: "AUTO",
+      type: "url-test",
+      url: "http://www.gstatic.com/generate_204",
+      interval: 300,
+      tolerance: 50,
+      proxies: proxyNames,
+    },
+    {
+      name: "PROXY",
+      type: "select",
+      proxies: ["AUTO", "DIRECT", ...proxyNames],
+    },
+  ];
+  const rules = ["MATCH,PROXY"];
+
+  return [
+    "mixed-port: 7890",
+    "allow-lan: false",
+    "mode: rule",
+    "log-level: info",
+    "unified-delay: true",
+    text,
+    `proxy-groups:\n${buildYaml(proxyGroups, 1)}`,
+    `rules:\n${buildYaml(rules, 1)}`,
+  ].join("\n");
+}
+
 function parseInlineYamlMap(body) {
   const trimmed = String(body || "").trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
@@ -1022,7 +1060,7 @@ async function fetchWithNode(subUrl, forwardHeaders) {
   return { body, responseHeaders, responseStatus, responseUrl };
 }
 
-async function produceOutput(rawText, output) {
+async function produceOutput(rawText, output, options = {}) {
   if (!rawText || rawText.trim().length === 0) {
     return { ok: false, error: "empty response" };
   }
@@ -1080,6 +1118,7 @@ async function produceOutput(rawText, output) {
 
   let out = rawText;
   let conversion = "none";
+  const appToken = sanitizeProfileToken(options.app);
 
   if (!looksLikeClashProviderYaml(rawText)) {
     let convertible = extractConvertibleSource(rawText);
@@ -1108,12 +1147,16 @@ async function produceOutput(rawText, output) {
   if (!hasAnySubscriptions(out)) {
     return { ok: false, error: "no subscriptions" };
   }
+  if (appToken === "flclashx") {
+    out = wrapClashProviderForFlClash(out);
+    conversion = conversion === "none" ? "flclashx-wrap" : `${conversion}+flclashx-wrap`;
+  }
   return { ok: true, body: out, contentType: "text/yaml; charset=utf-8", conversion };
 }
 
-async function refreshCache(subUrl, output, profileNames, forwardHeaders) {
+async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "") {
   const fetched = await fetchWithNode(subUrl, forwardHeaders);
-  const produced = await produceOutput(fetched.body, output);
+  const produced = await produceOutput(fetched.body, output, { app });
   if (!produced.ok) {
     return produced;
   }
@@ -1214,7 +1257,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       throw new Error("got HTML (anti-bot page)");
     }
 
-    const produced = await produceOutput(raw, output);
+    const produced = await produceOutput(raw, output, { app });
     if (!produced.ok) {
       writeStatus({
         ok: false,
@@ -1343,7 +1386,7 @@ async function handleLast(req, res, forcedProfileName = "") {
 
   let refreshed = null;
   try {
-    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders);
+    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders, app);
   } catch {
     refreshed = null;
   }

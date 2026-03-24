@@ -68,6 +68,19 @@ test("produceOutput returns expected content types for raw and clash", async () 
   assert.equal(clashResult.contentType, "text/yaml; charset=utf-8");
 });
 
+test("produceOutput wraps clash output for flclashx into full config", async () => {
+  const yamlInput = "proxies:\n  - name: test\n    type: ss\n    server: 1.1.1.1\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n";
+  const clashResult = await produceOutput(yamlInput, "clash", { app: "flclashx" });
+
+  assert.equal(clashResult.ok, true);
+  assert.match(clashResult.body, /^mixed-port:\s*7890$/m);
+  assert.match(clashResult.body, /^proxy-groups:\s*$/m);
+  assert.match(clashResult.body, /^rules:\s*$/m);
+  assert.match(clashResult.body, /name:\s*AUTO/);
+  assert.match(clashResult.body, /name:\s*PROXY/);
+  assert.match(clashResult.body, /MATCH,PROXY/);
+});
+
 test("produceOutput converts clash yaml fixture to raw URI list", async () => {
   const fixturePath = new URL("./test-fixtures/subscription-yml-sample.yml", import.meta.url);
   const yamlInput = fs.readFileSync(fixturePath, "utf8");

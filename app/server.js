@@ -527,7 +527,7 @@ async function handleSubscriptionTest(req, res) {
     }
 
     const fetched = await fetchWithNode(subUrl, forwardHeaders);
-    const produced = await produceOutput(fetched.body, output);
+    const produced = await produceOutput(fetched.body, output, { app });
 
     const key = cacheKey(subUrl, output, profileNames.join(","));
     const cachePath = cachePathForKey(key);
@@ -556,7 +556,7 @@ async function handleSubscriptionTest(req, res) {
 
     let cacheValidation = { ok: false, error: "cache not found" };
     if (cacheExists && cacheBody) {
-      const check = await produceOutput(cacheBody, output);
+      const check = await produceOutput(cacheBody, output, { app });
       if (check.ok) {
         cacheValidation = {
           ok: true,
