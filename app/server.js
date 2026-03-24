@@ -324,6 +324,8 @@ function parseYamlProxyNames(text) {
   const out = [];
   const seen = new Set();
   let inProxies = false;
+  let inProxyItem = false;
+  let proxyItemIndent = -1;
 
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
@@ -337,7 +339,32 @@ function parseYamlProxyNames(text) {
     const newTopLevel = rawLine.match(/^([A-Za-z0-9_.-]+)\s*:/);
     if (newTopLevel && !rawLine.startsWith(" ") && !rawLine.startsWith("-")) break;
 
-    const match = rawLine.match(/^\s*-\s*name\s*:\s*(.+)\s*$/);
+    const itemMatch = rawLine.match(/^(\s*)-\s*(.*)$/);
+    if (itemMatch) {
+      inProxyItem = true;
+      proxyItemIndent = itemMatch[1].length;
+      const inline = String(itemMatch[2] || "").trim();
+      const inlineName = inline.match(/^name\s*:\s*(.+)\s*$/);
+      if (!inlineName) continue;
+      let name = String(inlineName[1] || "").trim();
+      if ((name.startsWith("\"") && name.endsWith("\"")) || (name.startsWith("'") && name.endsWith("'"))) {
+        name = name.slice(1, -1);
+      }
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+      continue;
+    }
+
+    if (!inProxyItem) continue;
+    const indent = rawLine.match(/^(\s*)/)?.[1].length ?? 0;
+    if (indent <= proxyItemIndent) {
+      inProxyItem = false;
+      proxyItemIndent = -1;
+      continue;
+    }
+
+    const match = rawLine.match(/^\s*name\s*:\s*(.+)\s*$/);
     if (!match) continue;
     let name = String(match[1] || "").trim();
     if ((name.startsWith("\"") && name.endsWith("\"")) || (name.startsWith("'") && name.endsWith("'"))) {
@@ -1615,6 +1642,7 @@ if (isMain) {
 export {
   normalizeOutput,
   renderHomePage,
+  parseServersFromText,
   parseProfileYaml,
   readProfileFile,
   profileExists,

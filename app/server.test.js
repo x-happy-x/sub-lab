@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   normalizeOutput,
+  parseServersFromText,
   renderHomePage,
   readProfileFile,
   pickUserAgentProfile,
@@ -96,6 +97,22 @@ test("produceOutput wraps clash output for flclashx into full config", async () 
   assert.match(clashResult.body, /name:\s*AUTO/);
   assert.match(clashResult.body, /name:\s*PROXY/);
   assert.match(clashResult.body, /MATCH,PROXY/);
+});
+
+test("parseServersFromText reads multiline clash proxy items", () => {
+  const yamlInput = [
+    "proxies:",
+    "  -",
+    "    name: \"Alpha\"",
+    "    type: vless",
+    "  -",
+    "    name: \"Beta\"",
+    "    type: vless",
+    "proxy-groups:",
+    "  - name: AUTO",
+  ].join("\n");
+
+  assert.deepEqual(parseServersFromText(yamlInput), ["Alpha", "Beta"]);
 });
 
 test("produceOutput converts clash yaml fixture to raw URI list", async () => {
