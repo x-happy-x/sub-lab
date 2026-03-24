@@ -214,6 +214,8 @@ jobs:
             docker login ghcr.io -u "${{ secrets.GHCR_USER }}" -p "${{ secrets.GHCR_TOKEN }}"
             log_step "pull docker images"
             compose -f "${COMPOSE_FILE}" pull
+            log_step "remove existing sub-mirror container to avoid legacy docker-compose recreate bug"
+            compose -f "${COMPOSE_FILE}" rm -sf sub-mirror || true
             log_step "start docker compose stack"
             compose -f "${COMPOSE_FILE}" up -d
 
