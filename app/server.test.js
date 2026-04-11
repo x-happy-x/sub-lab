@@ -62,12 +62,12 @@ test("short-link type override normalizes raw and clash aliases", () => {
 });
 
 test("local source path resolves bundled bypass list", () => {
-  const localPath = resolveLocalSourcePath("bypass-all.txt");
-  assert.ok(localPath.endsWith("bypass-all.txt"));
+  const localPath = resolveLocalSourcePath("app/test-fixtures/local-source.txt");
+  assert.ok(localPath.endsWith("app/test-fixtures/local-source.txt"));
 });
 
 test("fetchWithNode reads local bypass list file", async () => {
-  const fetched = await fetchWithNode("bypass-all.txt", {});
+  const fetched = await fetchWithNode("app/test-fixtures/local-source.txt", {});
   assert.equal(fetched.responseStatus, 200);
   assert.match(fetched.responseUrl, /^file:\/\//);
   assert.match(fetched.body, /^vless:\/\//m);
