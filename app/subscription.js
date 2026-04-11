@@ -21,8 +21,15 @@ import {
   CACHE_DIR,
   normalizeOutput,
 } from "./config.js";
+import { resolveLocalSourceFilePath } from "./local-sources.js";
+import { getMergedSource } from "./local-sources.js";
 
 const UA_CATALOG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../resources/ua-catalog.json");
+const LOCAL_SOURCE_ROOTS = [
+  process.cwd(),
+  "/data",
+  "/resources",
+].map((root) => path.resolve(root));
 
 function isHtml(s) {
   const t = s.trim().toLowerCase();
@@ -423,6 +430,68 @@ function parseClashProxyList(yamlText) {
   return proxies;
 }
 
+function parseYamlProxyBlock(block) {
+  const text = String(block || "").replace(/\t/g, "  ");
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  const flat = {};
+  const stack = [];
+
+  function stackPath() {
+    return stack.map((entry) => entry.key).join(".");
+  }
+
+  function setValue(path, value) {
+    if (!path) return;
+    flat[path] = value;
+  }
+
+  function pushListValue(path, value) {
+    if (!path) return;
+    const existing = flat[path];
+    if (Array.isArray(existing)) {
+      existing.push(value);
+      return;
+    }
+    if (existing !== undefined) {
+      flat[path] = [existing, value];
+      return;
+    }
+    flat[path] = [value];
+  }
+
+  for (const rawLine of lines) {
+    const item = rawLine.match(/^(\s*)-\s*(.*)$/);
+    if (item) {
+      const indent = item[1].length;
+      const value = normalizeYamlScalarValue(item[2] || "");
+      while (stack.length > 0 && indent <= stack[stack.length - 1].indent) {
+        stack.pop();
+      }
+      pushListValue(stackPath(), value);
+      continue;
+    }
+
+    const kv = rawLine.match(/^(\s*)(['"]?[^'":]+['"]?)\s*:\s*(.*)$/);
+    if (!kv) continue;
+    const indent = kv[1].length;
+    const key = normalizeYamlKey(kv[2]);
+    const value = normalizeYamlScalarValue(kv[3] || "");
+
+    while (stack.length > 0 && indent <= stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+
+    const path = [...stack.map((entry) => entry.key), key].join(".");
+    if (value) {
+      setValue(path, value);
+      continue;
+    }
+    stack.push({ key, indent });
+  }
+
+  return flat;
+}
+
 function buildRawUriFromProxy(proxy) {
   const type = String(proxy.type || "").toLowerCase();
   const name = encodeURIComponent(String(proxy.name || proxy.server || "proxy"));
@@ -472,9 +541,41 @@ function buildRawUriFromProxy(proxy) {
     const uuid = String(proxy.uuid || "").trim();
     if (!uuid) return "";
     const params = new URLSearchParams();
-    params.set("type", String(proxy.network || "tcp"));
-    params.set("security", proxy.tls === "true" || proxy.tls === true ? "tls" : "none");
+    const network = String(proxy.network || "tcp").trim() || "tcp";
+    const hasReality = Boolean(proxy["reality-opts.public-key"] || proxy["reality-opts.short-id"]);
+    const security = hasReality
+      ? "reality"
+      : (proxy.tls === "true" || proxy.tls === true ? "tls" : "none");
+    params.set("type", network);
+    params.set("security", security);
     if (proxy.servername || proxy.sni) params.set("sni", String(proxy.servername || proxy.sni));
+    if (proxy.flow) params.set("flow", String(proxy.flow));
+    if (proxy["client-fingerprint"]) params.set("fp", String(proxy["client-fingerprint"]));
+    if (proxy["packet-encoding"]) params.set("packetEncoding", String(proxy["packet-encoding"]));
+    if (hasReality) {
+      if (proxy["reality-opts.public-key"]) params.set("pbk", String(proxy["reality-opts.public-key"]));
+      if (proxy["reality-opts.short-id"]) params.set("sid", String(proxy["reality-opts.short-id"]));
+    }
+    const alpn = Array.isArray(proxy.alpn) ? proxy.alpn.join(",") : String(proxy.alpn || "").trim();
+    if (alpn) params.set("alpn", alpn);
+    if (network === "ws") {
+      if (proxy["ws-opts.path"]) params.set("path", String(proxy["ws-opts.path"]));
+      if (proxy["ws-opts.headers.Host"] || proxy["ws-opts.headers.host"]) {
+        params.set("host", String(proxy["ws-opts.headers.Host"] || proxy["ws-opts.headers.host"]));
+      }
+    } else if (network === "grpc") {
+      if (proxy["grpc-opts.service-name"] || proxy["grpc-opts.serviceName"]) {
+        params.set("serviceName", String(proxy["grpc-opts.service-name"] || proxy["grpc-opts.serviceName"]));
+      }
+      if (proxy["grpc-opts.authority"]) params.set("authority", String(proxy["grpc-opts.authority"]));
+    } else if (network === "http") {
+      const path = Array.isArray(proxy["http-opts.path"]) ? proxy["http-opts.path"][0] : proxy["http-opts.path"];
+      const host = Array.isArray(proxy["http-opts.headers.Host"]) ? proxy["http-opts.headers.Host"][0] : proxy["http-opts.headers.Host"];
+      if (path) params.set("path", String(path));
+      if (host) params.set("host", String(host));
+    } else if (network === "tcp" && proxy["tcp-opts.header.type"]) {
+      params.set("headerType", String(proxy["tcp-opts.header.type"]));
+    }
     return `vless://${uuid}@${server}:${port}?${params.toString()}#${name}`;
   }
 
@@ -522,24 +623,40 @@ function convertClashYamlToRawUris(yamlText) {
     return m ? normalizeYamlScalarValue(m[1]) : "";
   }
 
-  const regexProxies = blocks.map((block) => ({
-    name: normalizeYamlScalarValue(block.replace(/^-+\s*name\s*:\s*/i, "").split(/\n/)[0] || ""),
-    type: getField(block, "type"),
-    server: getField(block, "server"),
-    port: getField(block, "port"),
-    network: getField(block, "network"),
-    tls: getField(block, "tls"),
-    servername: getField(block, "servername"),
-    sni: getField(block, "sni"),
-    uuid: getField(block, "uuid"),
-    cipher: getField(block, "cipher"),
-    method: getField(block, "method"),
-    password: getField(block, "password"),
-    obfs: getField(block, "obfs"),
-    protocol: getField(block, "protocol"),
-    "protocol-param": getField(block, "protocol-param"),
-    "obfs-param": getField(block, "obfs-param"),
-  }));
+  const regexProxies = blocks.map((block) => {
+    const flat = parseYamlProxyBlock(block);
+    return {
+      name: normalizeYamlScalarValue(block.replace(/^-+\s*name\s*:\s*/i, "").split(/\n/)[0] || ""),
+      type: flat.type || getField(block, "type"),
+      server: flat.server || getField(block, "server"),
+      port: flat.port || getField(block, "port"),
+      network: flat.network || getField(block, "network"),
+      tls: flat.tls || getField(block, "tls"),
+      servername: flat.servername || getField(block, "servername"),
+      sni: flat.sni || getField(block, "sni"),
+      uuid: flat.uuid || getField(block, "uuid"),
+      cipher: flat.cipher || getField(block, "cipher"),
+      method: flat.method || getField(block, "method"),
+      password: flat.password || getField(block, "password"),
+      obfs: flat.obfs || getField(block, "obfs"),
+      protocol: flat.protocol || getField(block, "protocol"),
+      flow: flat.flow || getField(block, "flow"),
+      "client-fingerprint": flat["client-fingerprint"] || getField(block, "client-fingerprint"),
+      "packet-encoding": flat["packet-encoding"] || getField(block, "packet-encoding"),
+      alpn: flat.alpn || getField(block, "alpn"),
+      "protocol-param": flat["protocol-param"] || getField(block, "protocol-param"),
+      "obfs-param": flat["obfs-param"] || getField(block, "obfs-param"),
+      "reality-opts.public-key": flat["reality-opts.public-key"] || "",
+      "reality-opts.short-id": flat["reality-opts.short-id"] || "",
+      "ws-opts.path": flat["ws-opts.path"] || "",
+      "ws-opts.headers.Host": flat["ws-opts.headers.Host"] || flat["ws-opts.headers.host"] || "",
+      "grpc-opts.service-name": flat["grpc-opts.service-name"] || flat["grpc-opts.serviceName"] || "",
+      "grpc-opts.authority": flat["grpc-opts.authority"] || "",
+      "http-opts.path": flat["http-opts.path"] || "",
+      "http-opts.headers.Host": flat["http-opts.headers.Host"] || flat["http-opts.headers.host"] || "",
+      "tcp-opts.header.type": flat["tcp-opts.header.type"] || "",
+    };
+  });
 
   lines = regexProxies.map(buildRawUriFromProxy).filter(Boolean);
   return lines.join("\n");
@@ -1069,7 +1186,104 @@ async function convertViaSubconverterToRaw(rawText) {
   }
 }
 
+function resolveLocalSourcePath(input) {
+  const raw = String(input || "").trim();
+  if (!raw || /^https?:\/\//i.test(raw)) return "";
+
+  if (raw.startsWith("local:")) {
+    const filePath = resolveLocalSourceFilePath(raw.slice(6).trim());
+    if (filePath && fs.existsSync(filePath)) return filePath;
+    return "";
+  }
+
+  let candidate = raw;
+  if (raw.startsWith("file://")) {
+    try {
+      candidate = decodeURIComponent(new URL(raw).pathname);
+    } catch {
+      return "";
+    }
+  } else if (raw.startsWith("file:")) {
+    candidate = raw.slice(5).trim();
+  }
+
+  const possible = [];
+  if (path.isAbsolute(candidate)) {
+    possible.push(path.resolve(candidate));
+  } else {
+    possible.push(path.resolve(process.cwd(), candidate));
+    possible.push(path.resolve("/data", candidate));
+    possible.push(path.resolve("/resources", candidate));
+  }
+
+  for (const next of possible) {
+    if (!LOCAL_SOURCE_ROOTS.some((root) => next === root || next.startsWith(`${root}${path.sep}`))) continue;
+    try {
+      if (fs.existsSync(next) && fs.statSync(next).isFile()) return next;
+    } catch {
+      // ignore unreadable candidate
+    }
+  }
+  return "";
+}
+
+function buildRequestUrlFromParams(params) {
+  const reqUrl = new URL("http://localhost/sub");
+  for (const key of ["sub_url", "output", "app", "device", "profile", "profiles", "hwid"]) {
+    const value = params?.[key];
+    if (value === undefined || value === null || value === "") continue;
+    reqUrl.searchParams.set(key, String(value));
+  }
+  return reqUrl;
+}
+
+async function fetchMergedSource(mergeId) {
+  const found = getMergedSource(mergeId);
+  if (!found.ok) {
+    throw new Error(found.error || "merged source not found");
+  }
+  const blocks = [];
+  for (const item of found.source.items) {
+    const reqUrl = buildRequestUrlFromParams(item || {});
+    const config = resolveRequestConfig(reqUrl, {});
+    if (!config.ok) {
+      throw new Error(config.error || "invalid merged source item");
+    }
+    const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
+    const produced = await produceOutput(fetched.body, OUTPUT_RAW, { app: config.app });
+    if (!produced.ok) {
+      throw new Error(produced.error || "failed to convert merged source item");
+    }
+    const lines = String(produced.body || "").trim();
+    if (lines) blocks.push(lines);
+  }
+  const body = blocks.join("\n");
+  return {
+    body,
+    responseHeaders: {
+      "content-type": "text/plain; charset=utf-8",
+    },
+    responseStatus: 200,
+    responseUrl: `merge:${mergeId}`,
+  };
+}
+
 async function fetchWithNode(subUrl, forwardHeaders) {
+  const raw = String(subUrl || "").trim();
+  if (raw.startsWith("merge:")) {
+    return fetchMergedSource(raw.slice(6).trim());
+  }
+  const localPath = resolveLocalSourcePath(subUrl);
+  if (localPath) {
+    return {
+      body: fs.readFileSync(localPath, "utf8"),
+      responseHeaders: {
+        "content-type": "text/plain; charset=utf-8",
+      },
+      responseStatus: 200,
+      responseUrl: `file://${localPath}`,
+    };
+  }
   const resp = await fetch(subUrl, {
     headers: forwardHeaders,
     redirect: "follow",
@@ -1617,6 +1831,7 @@ export {
   readProfileFile,
   profileExists,
   pickUserAgentProfile,
+  resolveLocalSourcePath,
   resolveRequestConfig,
   produceOutput,
   fetchWithNode,

@@ -21,6 +21,35 @@ export type FavoriteItem = {
   ts: number;
 };
 
+export type ImportedProxyItem = {
+  index: number;
+  flag: string;
+  name: string;
+  normalizedName: string;
+  normalizedUri: string;
+  uri: string;
+  type: string;
+  server: string;
+  port: number;
+  uuid: string;
+  password: string;
+  network: string;
+  security: string;
+  sni: string;
+  servername: string;
+  flow: string;
+  fp: string;
+  clientFingerprint: string;
+  pbk: string;
+  publicKey: string;
+  sid: string;
+  shortId: string;
+  path: string;
+  host: string;
+  serviceName: string;
+  transport: Record<string, string>;
+};
+
 export type SubTestResponse = {
   ok: boolean;
   request?: {

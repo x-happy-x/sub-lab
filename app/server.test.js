@@ -7,8 +7,11 @@ import {
   renderHomePage,
   readProfileFile,
   pickUserAgentProfile,
+  resolveLocalSourcePath,
   resolveRequestConfig,
+  resolveShortLinkTypeOverride,
   produceOutput,
+  fetchWithNode,
 } from "./server.js";
 
 test("normalizeOutput supports aliases", () => {
@@ -49,6 +52,25 @@ test("request config merges base and auto ua profiles with output alias", () => 
   assert.deepEqual(result.profileNames, ["xiaomi"]);
   assert.equal(result.forwardHeaders["x-device-os"], "Android");
   assert.equal(result.forwardHeaders["user-agent"], "FlClash X/0.3.2 Platform/android");
+});
+
+test("short-link type override normalizes raw and clash aliases", () => {
+  assert.equal(resolveShortLinkTypeOverride(new URL("http://localhost/l/test?type=raw")), "raw");
+  assert.equal(resolveShortLinkTypeOverride(new URL("http://localhost/l/test?type=yaml")), "yml");
+  assert.equal(resolveShortLinkTypeOverride(new URL("http://localhost/l/test?type=clash")), "yml");
+  assert.equal(resolveShortLinkTypeOverride(new URL("http://localhost/l/test")), "");
+});
+
+test("local source path resolves bundled bypass list", () => {
+  const localPath = resolveLocalSourcePath("bypass-all.txt");
+  assert.ok(localPath.endsWith("bypass-all.txt"));
+});
+
+test("fetchWithNode reads local bypass list file", async () => {
+  const fetched = await fetchWithNode("bypass-all.txt", {});
+  assert.equal(fetched.responseStatus, 200);
+  assert.match(fetched.responseUrl, /^file:\/\//);
+  assert.match(fetched.body, /^vless:\/\//m);
 });
 
 test("ua profile headers are locked and cannot be overridden by request headers", () => {
@@ -158,6 +180,13 @@ test("produceOutput converts clash yaml fixture to raw URI list", async () => {
     .filter((line) => line.startsWith("vless://") || line.startsWith("vmess://") || line.startsWith("ss://") || line.startsWith("trojan://") || line.startsWith("ssr://"));
 
   assert.ok(uriLines.length >= 4, "expected at least 4 raw URIs after yaml->raw conversion");
+  assert.ok(uriLines.some((line) => line.includes("security=reality")), "expected reality security for reality nodes");
+  assert.ok(uriLines.some((line) => line.includes("pbk=EXAMPLE_PUBLIC_KEY_001")), "expected public key in converted raw URI");
+  assert.ok(uriLines.some((line) => line.includes("sid=aa11bb22cc33dd44")), "expected short id in converted raw URI");
+  assert.ok(uriLines.some((line) => line.includes("fp=chrome")), "expected fingerprint in converted raw URI");
+  assert.ok(uriLines.some((line) => line.includes("flow=xtls-rprx-vision")), "expected flow in converted raw URI");
+  assert.ok(uriLines.some((line) => line.includes("path=%2Fws")), "expected ws path in converted raw URI");
+  assert.ok(uriLines.some((line) => line.includes("host=ws.example.net")), "expected ws host in converted raw URI");
 });
 
 test("produceOutput converts JSON outbound bundle fixture to raw URI list", async () => {

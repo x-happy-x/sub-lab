@@ -53,6 +53,8 @@ rsync -az --delete \
   --exclude 'data/cache/**' \
   --exclude 'data/profiles/' \
   --exclude 'data/profiles/**' \
+  --exclude 'data/local-sources/' \
+  --exclude 'data/local-sources/**' \
   --exclude 'data/raw.txt' \
   --exclude 'data/subscription.yaml' \
   --exclude 'data/status.json' \

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ComponentProps } from "react";
-import type { AuthUser, FavoriteItem, MockSource, ProfileCatalog, ShortLinkUsersData, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps } from "react";
+import type { AuthUser, FavoriteItem, ImportedProxyItem, MockSource, ProfileCatalog, ShortLinkUsersData, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
 import { readFavorites, writeFavorites } from "./lib/storage";
 import {
   clearMockLogs,
@@ -9,6 +9,8 @@ import {
   adminListUsers,
   adminUpdateUser,
   createShortLink,
+  createLocalSource,
+  createMergedSource,
   deleteProfile,
   fetchProfileCatalog,
   fetchAppsCatalog,
@@ -18,6 +20,8 @@ import {
   fetchShortLink,
   fetchPublicShortLink,
   fetchPublicShortMeta,
+  fetchLocalSource,
+  parseBulkImport,
   getMockLogs,
   getMockSource,
   login,
@@ -101,6 +105,21 @@ function defaultPayload(): SubscriptionPayload {
     profiles: "",
     hwid: "",
   };
+}
+
+type ComposerSourceMode = "url" | "file" | "text";
+
+function sourceModeFromPayload(payload: SubscriptionPayload | null): ComposerSourceMode {
+  const subUrl = String(payload?.sub_url || "").trim().toLowerCase();
+  if (subUrl.startsWith("local:")) return "text";
+  return "url";
+}
+
+function countSourceServers(value: string): number {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^(vless|vmess|ss|ssr|trojan):\/\//.test(line)).length;
 }
 
 function labelsFromPayload(p: SubscriptionPayload): string[] {
@@ -290,7 +309,7 @@ function generateHwidByOs(os: string): string {
 }
 
 export default function App() {
-  type ModalKind = "import" | "composer" | "tester" | "mock" | "profileEditor" | "share" | "subUsers";
+  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "profileEditor" | "share" | "subUsers";
   const [theme, setTheme] = useState<"claude" | "claude-dark">(() => {
     const saved = localStorage.getItem("submirror-theme");
     if (saved === "claude" || saved === "claude-dark") return saved;
@@ -312,11 +331,17 @@ export default function App() {
   const [adminNewRole, setAdminNewRole] = useState<"user" | "admin">("user");
   const [adminEditPassword, setAdminEditPassword] = useState("");
   const [payload, setPayload] = useState<SubscriptionPayload>(defaultPayload());
+  const [composerSourceMode, setComposerSourceMode] = useState<ComposerSourceMode>("url");
+  const [composerFileName, setComposerFileName] = useState("");
+  const [composerFileBody, setComposerFileBody] = useState("");
+  const [composerTextBody, setComposerTextBody] = useState("");
   const [name, setName] = useState("");
   const [editingIndex, setEditingIndex] = useState<number>(-1);
   const [importUrl, setImportUrl] = useState("");
   const [showImport, setShowImport] = useState(false);
   const [showComposer, setShowComposer] = useState(false);
+  const [showBulkImport, setShowBulkImport] = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
   const [showTester, setShowTester] = useState(false);
   const [showMock, setShowMock] = useState(false);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
@@ -363,6 +388,20 @@ export default function App() {
   const [mockLogs, setMockLogs] = useState("");
   const [mockTestTarget, setMockTestTarget] = useState("__current__");
   const [publicBaseUrl, setPublicBaseUrl] = useState("");
+  const composerFileInputRef = useRef<HTMLInputElement | null>(null);
+  const bulkImportFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [bulkImportFileName, setBulkImportFileName] = useState("");
+  const [bulkImportRaw, setBulkImportRaw] = useState("");
+  const [bulkImportItems, setBulkImportItems] = useState<ImportedProxyItem[]>([]);
+  const [bulkImportMask, setBulkImportMask] = useState("");
+  const [bulkImportRegex, setBulkImportRegex] = useState("");
+  const [bulkImportCountry, setBulkImportCountry] = useState("");
+  const [bulkImportSplitSize, setBulkImportSplitSize] = useState("0");
+  const [bulkImportOutput, setBulkImportOutput] = useState<SubscriptionPayload["output"]>("raw");
+  const [bulkImportName, setBulkImportName] = useState("Импорт подписки");
+  const [mergeName, setMergeName] = useState("Объединенная подписка");
+  const [mergeOutput, setMergeOutput] = useState<SubscriptionPayload["output"]>("yml");
+  const [mergeSelection, setMergeSelection] = useState<Record<string, boolean>>({});
 
   const notify = (level: NotificationLevel, message: string) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -443,7 +482,7 @@ export default function App() {
     : ((publicTypeOverrideRaw === "yml" || publicTypeOverrideRaw === "yaml" || publicTypeOverrideRaw === "clash") ? "yml" : "");
   const isAdminUser = authUser?.role === "admin";
   const isMainPath = !isAdminPath && !publicShareId;
-  const isAnyModalOpen = showImport || showComposer || showTester || showMock || showProfileEditor || showShare || showSubUsers;
+  const isAnyModalOpen = showImport || showComposer || showBulkImport || showMerge || showTester || showMock || showProfileEditor || showShare || showSubUsers;
 
   const refreshAdminUsers = async () => {
     const list = await adminListUsers();
@@ -476,11 +515,11 @@ export default function App() {
       })
       .finally(() => setPublicShareLoading(false));
 
-    void fetchPublicShortMeta(publicShareId)
+    void fetchPublicShortMeta(publicShareId, publicTypeOverride)
       .then((meta) => setPublicShareMeta(meta))
       .catch(() => {})
       .finally(() => setPublicShareMetaLoading(false));
-  }, [publicShareId]);
+  }, [publicShareId, publicTypeOverride]);
 
   useEffect(() => {
     if (!showShare || !shareItem?.shortId) {
@@ -512,6 +551,8 @@ export default function App() {
   const closeAllModals = () => {
     setShowImport(false);
     setShowComposer(false);
+    setShowBulkImport(false);
+    setShowMerge(false);
     setShowTester(false);
     setShowMock(false);
     setShowProfileEditor(false);
@@ -523,6 +564,8 @@ export default function App() {
     closeAllModals();
     if (kind === "import") setShowImport(true);
     if (kind === "composer") setShowComposer(true);
+    if (kind === "bulkImport") setShowBulkImport(true);
+    if (kind === "merge") setShowMerge(true);
     if (kind === "tester") setShowTester(true);
     if (kind === "mock") setShowMock(true);
     if (kind === "profileEditor") setShowProfileEditor(true);
@@ -532,22 +575,167 @@ export default function App() {
 
   const resetComposer = () => {
     setPayload(defaultPayload());
+    setComposerSourceMode("url");
+    setComposerFileName("");
+    setComposerFileBody("");
+    setComposerTextBody("");
     setName("");
     setEditingIndex(-1);
   };
 
+  const hydrateComposerSource = async (nextPayload: SubscriptionPayload) => {
+    const mode = sourceModeFromPayload(nextPayload);
+    setComposerSourceMode(mode);
+    setComposerFileName("");
+    setComposerFileBody("");
+    setComposerTextBody("");
+    if (mode !== "text") return;
+    const subUrl = String(nextPayload.sub_url || "").trim();
+    if (!subUrl.startsWith("local:")) return;
+    try {
+      const source = await fetchLocalSource(subUrl.slice(6));
+      setComposerTextBody(source.body);
+      setComposerFileName(source.name);
+    } catch {
+      // keep alias in sub_url when body is unavailable
+    }
+  };
+
+  const resolveComposerSubUrl = async () => {
+    if (composerSourceMode === "url") {
+      return String(payload.sub_url || "").trim();
+    }
+    if (composerSourceMode === "file") {
+      const body = String(composerFileBody || "").trim();
+      if (!body) throw new Error("Загрузите файл со списком адресов");
+      const created = await createLocalSource({
+        name: composerFileName || "uploaded-source.txt",
+        body,
+      });
+      return created.subUrl;
+    }
+    const body = String(composerTextBody || "").trim();
+    if (!body) throw new Error("Заполните поле с адресами");
+    const created = await createLocalSource({
+      name: name.trim() || "inline-source",
+      body,
+    });
+    return created.subUrl;
+  };
+
+  const handleComposerFilePicked = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setComposerFileName(file.name);
+      setComposerFileBody(text);
+      setStatus(`Файл загружен: ${file.name}`);
+    } catch {
+      setStatus("Не удалось прочитать файл");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const handleBulkImportFilePicked = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const items = await parseBulkImport(text);
+      setBulkImportFileName(file.name);
+      setBulkImportRaw(text);
+      setBulkImportItems(items);
+      setBulkImportName(file.name.replace(/\.[^.]+$/, "") || "Импорт подписки");
+      setStatus(`Импортировано прокси: ${items.length}`);
+    } catch (e) {
+      setStatus((e as Error)?.message || "Не удалось импортировать файл");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const openBulkImportModal = () => {
+    setBulkImportFileName("");
+    setBulkImportRaw("");
+    setBulkImportItems([]);
+    setBulkImportMask("");
+    setBulkImportRegex("");
+    setBulkImportCountry("");
+    setBulkImportSplitSize("0");
+    setBulkImportOutput("raw");
+    setBulkImportName("Импорт подписки");
+    openModal("bulkImport");
+  };
+
+  const handleCreateBulkImportedSubscriptions = async () => {
+    if (!bulkImportName.trim()) {
+      setStatus("Укажите название импорта");
+      return;
+    }
+    if (bulkImportFilteredItems.length === 0) {
+      setStatus("Нет прокси после фильтрации");
+      return;
+    }
+    try {
+      const splitSize = Math.max(0, Number(bulkImportSplitSize || "0"));
+      const chunks: ImportedProxyItem[][] = [];
+      if (splitSize > 0) {
+        for (let i = 0; i < bulkImportFilteredItems.length; i += splitSize) {
+          chunks.push(bulkImportFilteredItems.slice(i, i + splitSize));
+        }
+      } else {
+        chunks.push(bulkImportFilteredItems);
+      }
+
+      const createdItems: FavoriteItem[] = [];
+      for (const [index, chunk] of chunks.entries()) {
+        const body = chunk.map((item) => item.normalizedUri).join("\n");
+        const local = await createLocalSource({
+          name: chunks.length > 1 ? `${bulkImportName.trim()} part ${index + 1}` : bulkImportName.trim(),
+          body,
+        });
+        const nextPayload: SubscriptionPayload = {
+          ...defaultPayload(),
+          sub_url: local.subUrl,
+          output: bulkImportOutput,
+        };
+        const short = await createShortLink(nextPayload);
+        createdItems.push({
+          title: chunks.length > 1 ? `${bulkImportName.trim()} ${String(index + 1).padStart(2, "0")}` : bulkImportName.trim(),
+          url: short.shortUrl,
+          shortId: short.id,
+          payload: nextPayload,
+          labels: [...labelsFromPayload(nextPayload), `import:${chunk.length}`],
+          ts: Date.now() + index,
+        });
+      }
+      saveFavorites([...createdItems, ...favorites]);
+      setShowBulkImport(false);
+      notify("success", `Создано подписок: ${createdItems.length}`);
+    } catch (e) {
+      const message = (e as Error)?.message || "Не удалось создать подписки из импорта";
+      setStatus(message);
+      notify("error", message);
+    }
+  };
+
   const handleSave = async (forceNew: boolean) => {
-    if (!payload.sub_url) return setStatus("Укажите sub_url");
+    let resolvedSubUrl = "";
     if (!name.trim()) return setStatus("Укажите название");
     try {
+      resolvedSubUrl = await resolveComposerSubUrl();
+      if (!resolvedSubUrl) return setStatus("Укажите источник подписки");
       const next = [...favorites];
       const existing = !forceNew && editingIndex >= 0 ? next[editingIndex] : null;
       let shortId = existing?.shortId || "";
       let shortUrl = existing?.url || "";
+      const nextPayload = { ...payload, sub_url: resolvedSubUrl };
 
-      if (shortId && !forceNew) await updateShortLink(shortId, payload);
+      if (shortId && !forceNew) await updateShortLink(shortId, nextPayload);
       else {
-        const created = await createShortLink(payload);
+        const created = await createShortLink(nextPayload);
         shortId = created.id;
         shortUrl = created.shortUrl;
       }
@@ -556,8 +744,8 @@ export default function App() {
         title: name.trim(),
         url: shortUrl,
         shortId,
-        payload: { ...payload },
-        labels: labelsFromPayload(payload),
+        payload: nextPayload,
+        labels: labelsFromPayload(nextPayload),
         ts: Date.now(),
       };
 
@@ -578,29 +766,90 @@ export default function App() {
   const applyImport = async () => {
     const parsed = parseUrlToPayload(importUrl.trim());
     if (!parsed.ok) return setStatus(parsed.error || "Ошибка импорта");
+    let nextPayload = defaultPayload();
     if (parsed.shortId) {
       const p = await fetchShortLink(parsed.shortId);
-      setPayload({ ...defaultPayload(), ...p });
+      nextPayload = { ...defaultPayload(), ...p };
     } else if (parsed.payload) {
-      setPayload({ ...defaultPayload(), ...parsed.payload });
+      nextPayload = { ...defaultPayload(), ...parsed.payload };
     }
+    setPayload(nextPayload);
     openModal("composer");
+    await hydrateComposerSource(nextPayload);
     notify("info", "Ссылка импортирована");
   };
 
-  const onEdit = (idx: number) => {
+  const onEdit = async (idx: number) => {
     const item = favorites[idx];
     if (!item) return;
     setEditingIndex(idx);
     setName(item.title);
-    setPayload({ ...defaultPayload(), ...item.payload });
+    const nextPayload = { ...defaultPayload(), ...item.payload };
+    setPayload(nextPayload);
     openModal("composer");
+    await hydrateComposerSource(nextPayload);
   };
 
   const onDelete = (idx: number) => {
     const next = favorites.filter((_, i) => i !== idx);
     saveFavorites(next);
     notify("info", "Подписка удалена");
+  };
+
+  const openMergeModal = () => {
+    setMergeName("Объединенная подписка");
+    setMergeOutput("yml");
+    setMergeSelection({});
+    openModal("merge");
+  };
+
+  const handleCreateMergedSubscription = async () => {
+    if (!mergeName.trim()) {
+      setStatus("Укажите название объединенной подписки");
+      return;
+    }
+    if (selectedMergeIndexes.length === 0) {
+      setStatus("Выберите хотя бы одну подписку");
+      return;
+    }
+    try {
+      const items: SubscriptionPayload[] = [];
+      for (const idx of selectedMergeIndexes) {
+        const item = favorites[idx];
+        if (!item) continue;
+        let sourcePayload = item.payload;
+        if ((!sourcePayload || !sourcePayload.sub_url) && item.shortId) {
+          sourcePayload = await fetchShortLink(item.shortId);
+        }
+        items.push({ ...defaultPayload(), ...sourcePayload });
+      }
+      const merged = await createMergedSource({
+        name: mergeName.trim(),
+        items,
+      });
+      const mergedPayload: SubscriptionPayload = {
+        ...defaultPayload(),
+        sub_url: merged.subUrl,
+        output: mergeOutput,
+      };
+      const created = await createShortLink(mergedPayload);
+      const next: FavoriteItem = {
+        title: mergeName.trim(),
+        url: created.shortUrl,
+        shortId: created.id,
+        payload: mergedPayload,
+        labels: [...labelsFromPayload(mergedPayload), `merge:${items.length}`],
+        ts: Date.now(),
+      };
+      saveFavorites([next, ...favorites]);
+      setShowMerge(false);
+      setStatus(`Сохранено: ${created.shortUrl}`);
+      notify("success", "Объединенная подписка создана");
+    } catch (e) {
+      const message = (e as Error)?.message || "Не удалось создать объединенную подписку";
+      setStatus(message);
+      notify("error", message);
+    }
   };
 
   const runTester = async (data = payload) => {
@@ -629,6 +878,33 @@ export default function App() {
   const sourceServers = useMemo(() => testResult?.upstream?.servers || [], [testResult]);
   const convertedServers = useMemo(() => testResult?.conversion?.servers || [], [testResult]);
   const osOptions = useMemo(() => Object.keys(uaCatalog.options || {}), [uaCatalog]);
+  const composerFileServersCount = useMemo(() => countSourceServers(composerFileBody), [composerFileBody]);
+  const composerTextServersCount = useMemo(() => countSourceServers(composerTextBody), [composerTextBody]);
+  const selectedMergeIndexes = useMemo(
+    () => Object.entries(mergeSelection).filter(([, selected]) => selected).map(([key]) => Number(key)).filter((x) => Number.isInteger(x) && x >= 0 && x < favorites.length),
+    [mergeSelection, favorites.length],
+  );
+  const bulkImportFlags = useMemo(
+    () => Array.from(new Set(bulkImportItems.map((item) => item.flag))).sort((a, b) => a.localeCompare(b)),
+    [bulkImportItems],
+  );
+  const bulkImportFilteredItems = useMemo(() => {
+    let next = [...bulkImportItems];
+    if (bulkImportCountry) next = next.filter((item) => item.flag === bulkImportCountry);
+    if (bulkImportMask.trim()) {
+      const mask = bulkImportMask.trim().toLowerCase();
+      next = next.filter((item) => item.normalizedName.toLowerCase().includes(mask) || item.name.toLowerCase().includes(mask));
+    }
+    if (bulkImportRegex.trim()) {
+      try {
+        const re = new RegExp(bulkImportRegex, "i");
+        next = next.filter((item) => re.test(item.normalizedName) || re.test(item.name));
+      } catch {
+        return [];
+      }
+    }
+    return next;
+  }, [bulkImportCountry, bulkImportItems, bulkImportMask, bulkImportRegex]);
   const appOptions = useMemo(() => {
     if (appsCatalog.length > 0) return appsCatalog;
     if (!selectedOs || !uaCatalog.options[selectedOs]) return [];
@@ -1439,8 +1715,14 @@ export default function App() {
         <TipButton tip="Импортировать подписку" className="btn" onClick={() => openModal("import")}>
           <ImportIcon className="btn-icon" /> Импорт
         </TipButton>
+        <TipButton tip="Импортировать массовый файл прокси" className="btn" onClick={openBulkImportModal}>
+          <ImportIcon className="btn-icon" /> Массовый импорт
+        </TipButton>
         <TipButton tip="Добавить новую подписку" tone="primary" className="btn" onClick={() => { resetComposer(); openModal("composer"); }}>
           <PlusIcon className="btn-icon" /> Добавить
+        </TipButton>
+        <TipButton tip="Объединить несколько подписок в одну" className="btn" onClick={openMergeModal}>
+          <CopyIcon className="btn-icon" /> Объединить
         </TipButton>
       </section>
 
@@ -1469,14 +1751,144 @@ export default function App() {
         </Modal>
       ) : null}
 
+      {showBulkImport ? (
+        <Modal onClose={() => setShowBulkImport(false)} title="Массовый импорт" showCloseButton>
+          <label className="composer-label">Файл</label>
+          <div className="url-row">
+            <TextInput placeholder="Выберите текстовый файл с proxy-ссылками" value={bulkImportFileName} onChange={() => {}} readOnly />
+            <TipButton tip="Выбрать файл для импорта" tone="primary" className="btn" onClick={() => bulkImportFileInputRef.current?.click()}>Выбрать файл</TipButton>
+            <input ref={bulkImportFileInputRef} type="file" accept=".txt,.log,.conf,text/plain" hidden onChange={(e) => void handleBulkImportFilePicked(e)} />
+          </div>
+          <div className="composer-meta-hint">Найдено прокси: {bulkImportItems.length}</div>
+
+          <label className="composer-label">Название</label>
+          <TextInput placeholder="Название набора" value={bulkImportName} onChange={(e) => setBulkImportName(e.target.value)} />
+
+          <label className="composer-label">Выходной формат</label>
+          <div className="chip-row">
+            <TipChipButton tip="Формат YAML" className={`chip-btn ${bulkImportOutput === "yml" ? "active" : ""}`} onClick={() => setBulkImportOutput("yml")}>yml</TipChipButton>
+            <TipChipButton tip="Формат RAW" className={`chip-btn ${bulkImportOutput === "raw" ? "active" : ""}`} onClick={() => setBulkImportOutput("raw")}>raw</TipChipButton>
+            <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${bulkImportOutput === "raw_base64" ? "active" : ""}`} onClick={() => setBulkImportOutput("raw_base64")}>raw (base64)</TipChipButton>
+            <TipChipButton tip="Формат JSON" className={`chip-btn ${bulkImportOutput === "json" ? "active" : ""}`} onClick={() => setBulkImportOutput("json")}>json</TipChipButton>
+          </div>
+
+          <label className="composer-label">Фильтры</label>
+          <div className="row">
+            <select value={bulkImportCountry} onChange={(e) => setBulkImportCountry(e.target.value)}>
+              <option value="">Все страны</option>
+              {bulkImportFlags.map((flag) => <option key={flag} value={flag}>{flag}</option>)}
+            </select>
+            <TextInput placeholder="Маска имени" value={bulkImportMask} onChange={(e) => setBulkImportMask(e.target.value)} />
+          </div>
+          <div className="row">
+            <TextInput placeholder="Regex" value={bulkImportRegex} onChange={(e) => setBulkImportRegex(e.target.value)} />
+            <TextInput placeholder="Размер части, 0 = без деления" value={bulkImportSplitSize} onChange={(e) => setBulkImportSplitSize(e.target.value)} />
+          </div>
+          <div className="composer-meta-hint">После фильтрации: {bulkImportFilteredItems.length}</div>
+
+          <label className="composer-label">Предпросмотр</label>
+          <div className="bulk-import-preview">
+            {bulkImportFilteredItems.slice(0, 200).map((item) => (
+              <article key={`${item.index}-${item.server}-${item.port}`} className="bulk-import-item">
+                <div className="bulk-import-title">{item.normalizedName}</div>
+                <div className="bulk-import-sub">{item.type} · {item.server}:{item.port} · {item.network} · {item.security}</div>
+                <div className="bulk-import-fields">
+                  {item.uuid ? <span>uuid: {item.uuid}</span> : null}
+                  {item.password ? <span>password: {item.password}</span> : null}
+                  {item.sni ? <span>sni: {item.sni}</span> : null}
+                  {item.flow ? <span>flow: {item.flow}</span> : null}
+                  {item.fp ? <span>fp: {item.fp}</span> : null}
+                  {item.pbk ? <span>pbk: {item.pbk}</span> : null}
+                  {item.sid ? <span>sid: {item.sid}</span> : null}
+                  {item.path ? <span>path: {item.path}</span> : null}
+                  {item.host ? <span>host: {item.host}</span> : null}
+                  {item.serviceName ? <span>serviceName: {item.serviceName}</span> : null}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="toolbar">
+            <TipButton tip="Создать подписки из отфильтрованного списка" tone="primary" className="btn" onClick={() => void handleCreateBulkImportedSubscriptions()}>
+              Создать подписки
+            </TipButton>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showMerge ? (
+        <Modal onClose={() => setShowMerge(false)} title="Объединение подписок" showCloseButton>
+          <label className="composer-label">Название</label>
+          <TextInput placeholder="Название объединенной подписки" value={mergeName} onChange={(e) => setMergeName(e.target.value)} />
+
+          <label className="composer-label">Выходной формат</label>
+          <div className="chip-row">
+            <TipChipButton tip="Формат YAML" className={`chip-btn ${mergeOutput === "yml" ? "active" : ""}`} onClick={() => setMergeOutput("yml")}>yml</TipChipButton>
+            <TipChipButton tip="Формат RAW" className={`chip-btn ${mergeOutput === "raw" ? "active" : ""}`} onClick={() => setMergeOutput("raw")}>raw</TipChipButton>
+            <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${mergeOutput === "raw_base64" ? "active" : ""}`} onClick={() => setMergeOutput("raw_base64")}>raw (base64)</TipChipButton>
+            <TipChipButton tip="Формат JSON" className={`chip-btn ${mergeOutput === "json" ? "active" : ""}`} onClick={() => setMergeOutput("json")}>json</TipChipButton>
+          </div>
+
+          <label className="composer-label">Подписки для объединения</label>
+          <div className="merge-list">
+            {favorites.length === 0 ? (
+              <div className="status">Нет настроенных подписок для объединения.</div>
+            ) : favorites.map((item, idx) => (
+              <label key={`${item.shortId || item.title}-${idx}`} className="merge-item">
+                <input
+                  type="checkbox"
+                  checked={Boolean(mergeSelection[String(idx)])}
+                  onChange={(e) => setMergeSelection((prev) => ({ ...prev, [String(idx)]: e.target.checked }))}
+                />
+                <span className="merge-item-main">
+                  <strong>{item.title}</strong>
+                  <span className="merge-item-sub">{item.payload.output || "yml"} · {item.payload.app || "-"} · {item.payload.device || "-"}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          <div className="status">Выбрано: {selectedMergeIndexes.length}</div>
+          <div className="toolbar">
+            <TipButton tip="Создать новую объединенную подписку" tone="primary" className="btn" onClick={() => void handleCreateMergedSubscription()}>
+              Создать объединение
+            </TipButton>
+          </div>
+        </Modal>
+      ) : null}
+
       {showComposer ? (
         <Modal onClose={() => setShowComposer(false)} title="Конструктор подписки" showCloseButton>
           <label className="composer-label">Название</label>
           <TextInput placeholder="Название подписки" value={name} onChange={(e) => setName(e.target.value)} />
 
-          <label className="composer-label">URL источника</label>
-          <div className="url-row">
-            <TextInput placeholder="URL источника (sub_url)" value={payload.sub_url} onChange={(e) => setPayload({ ...payload, sub_url: e.target.value })} />
+          <label className="composer-label">Источник</label>
+          <div className="chip-row">
+            <TipChipButton tip="Загрузить источник по URL" className={`chip-btn ${composerSourceMode === "url" ? "active" : ""}`} onClick={() => setComposerSourceMode("url")}>URL</TipChipButton>
+            <TipChipButton tip="Загрузить файл со списком адресов" className={`chip-btn ${composerSourceMode === "file" ? "active" : ""}`} onClick={() => setComposerSourceMode("file")}>Файл</TipChipButton>
+            <TipChipButton tip="Вставить список адресов вручную" className={`chip-btn ${composerSourceMode === "text" ? "active" : ""}`} onClick={() => setComposerSourceMode("text")}>Поле</TipChipButton>
+          </div>
+          {composerSourceMode === "url" ? (
+            <div className="url-row">
+              <TextInput placeholder="URL или встроенный файл, например bypass-all.txt" value={payload.sub_url} onChange={(e) => setPayload({ ...payload, sub_url: e.target.value })} />
+            </div>
+          ) : null}
+          {composerSourceMode === "file" ? (
+            <>
+              <div className="url-row">
+                <TextInput placeholder="Выберите файл со списком vless://..." value={composerFileName} onChange={() => {}} readOnly />
+                <TipButton tip="Выбрать файл источника" tone="primary" className="btn" onClick={() => composerFileInputRef.current?.click()}>Выбрать файл</TipButton>
+                <input ref={composerFileInputRef} type="file" accept=".txt,.log,.conf,text/plain" hidden onChange={(e) => void handleComposerFilePicked(e)} />
+              </div>
+              <Textarea rows={10} placeholder="Содержимое файла появится здесь" value={composerFileBody} onChange={(e) => setComposerFileBody(e.target.value)} />
+              <div className="composer-meta-hint">Серверов найдено: {composerFileServersCount}</div>
+            </>
+          ) : null}
+          {composerSourceMode === "text" ? (
+            <>
+              <Textarea rows={10} placeholder={"Вставьте vless:// адреса, по одному на строку"} value={composerTextBody} onChange={(e) => setComposerTextBody(e.target.value)} />
+              <div className="composer-meta-hint">Серверов найдено: {composerTextServersCount}</div>
+            </>
+          ) : null}
+          <div className="chip-row">
             <TipChipButton
               tip="Переключить режим выдачи"
               className="chip-btn chip-toggle"

@@ -20,4 +20,4 @@ services:
       PROFILE_DIR: "/resources/profiles"
       APP_PORT: "8788"
       SUBCONVERTER_PORT: "8787"
-      PUBLIC_BASE_URL: "http://sublab.local"
+      PUBLIC_BASE_URL: ""

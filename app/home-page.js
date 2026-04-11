@@ -537,8 +537,8 @@ function renderHomePage() {
         <div id="realSourceWrap" class="fields">
           <div class="full">
             <label for="sub_url">sub_url</label>
-            <input id="sub_url" type="text" placeholder="https://example.com/sub" />
-            <div class="hint">URL реального источника подписки.</div>
+            <input id="sub_url" type="text" placeholder="https://example.com/sub или bypass-all.txt" />
+            <div class="hint">URL реального источника подписки или локальный файл внутри сервиса.</div>
           </div>
         </div>
 

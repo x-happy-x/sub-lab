@@ -1,4 +1,4 @@
-import type { AuthUser, MockSource, ProfileCatalog, ShortLinkUsersData, SubTestResponse, SubscriptionPayload, UACatalog } from "../types";
+import type { AuthUser, ImportedProxyItem, MockSource, ProfileCatalog, ShortLinkUsersData, SubTestResponse, SubscriptionPayload, UACatalog } from "../types";
 import type { FavoriteItem } from "../types";
 
 const PARAM_KEYS = ["sub_url", "endpoint", "output", "app", "device", "profile", "profiles", "hwid"] as const;
@@ -72,6 +72,59 @@ export async function fetchShortLink(id: string): Promise<SubscriptionPayload> {
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link fetch failed");
   return json.link.params as SubscriptionPayload;
+}
+
+export async function createLocalSource(input: { name?: string; body: string }): Promise<{ id: string; subUrl: string; body: string; name: string }> {
+  const resp = await fetch("/api/local-sources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input || {}),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "local source create failed");
+  return {
+    id: String(json.source?.id || ""),
+    subUrl: String(json.subUrl || ""),
+    body: String(json.source?.body || ""),
+    name: String(json.source?.name || ""),
+  };
+}
+
+export async function fetchLocalSource(id: string): Promise<{ id: string; subUrl: string; body: string; name: string }> {
+  const resp = await fetch(`/api/local-sources/${encodeURIComponent(id)}`);
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "local source fetch failed");
+  return {
+    id: String(json.source?.id || id),
+    subUrl: String(json.subUrl || `local:${id}`),
+    body: String(json.source?.body || ""),
+    name: String(json.source?.name || ""),
+  };
+}
+
+export async function createMergedSource(input: { name?: string; items: SubscriptionPayload[] }): Promise<{ id: string; subUrl: string }> {
+  const resp = await fetch("/api/merged-sources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input || {}),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "merged source create failed");
+  return {
+    id: String(json.source?.id || ""),
+    subUrl: String(json.subUrl || ""),
+  };
+}
+
+export async function parseBulkImport(text: string): Promise<ImportedProxyItem[]> {
+  const resp = await fetch("/api/import/parse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "bulk import parse failed");
+  return Array.isArray(json.items) ? json.items as ImportedProxyItem[] : [];
 }
 
 export async function fetchShortLinkUsers(id: string): Promise<ShortLinkUsersData> {
@@ -149,8 +202,12 @@ export type PublicShortMeta = {
   profiles: string[];
 };
 
-export async function fetchPublicShortMeta(id: string): Promise<PublicShortMeta> {
-  const resp = await fetch(`/api/public-short-links/${encodeURIComponent(id)}/meta`);
+export async function fetchPublicShortMeta(id: string, typeOverride = ""): Promise<PublicShortMeta> {
+  const query = new URLSearchParams();
+  const type = String(typeOverride || "").trim().toLowerCase();
+  if (type === "raw" || type === "yml") query.set("type", type);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const resp = await fetch(`/api/public-short-links/${encodeURIComponent(id)}/meta${suffix}`);
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "public short-link meta fetch failed");
   const meta = (json.meta || {}) as Record<string, unknown>;

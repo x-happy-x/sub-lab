@@ -59,6 +59,7 @@ import {
   readProfileFile,
   profileExists,
   pickUserAgentProfile,
+  resolveLocalSourcePath,
   resolveRequestConfig,
   produceOutput,
   fetchWithNode,
@@ -67,7 +68,13 @@ import {
   handleEcho,
   serveStaticFile,
 } from "./subscription.js";
+import {
+  createLocalSource,
+  createMergedSource,
+  getLocalSource,
+} from "./local-sources.js";
 import { getAppsCatalog, getAppGuide } from "./apps-catalog.js";
+import { parseBulkProxyText } from "./proxy-import.js";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_DIST_CANDIDATES = [
@@ -791,6 +798,62 @@ async function handleGetShortLink(req, res, id) {
   });
 }
 
+async function handleCreateLocalSource(req, res) {
+  try {
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const created = createLocalSource(body || {});
+    if (!created.ok) {
+      sendJson(res, created.status || 400, created);
+      return;
+    }
+    sendJson(res, 201, {
+      ok: true,
+      source: created.source,
+      subUrl: `local:${created.source.id}`,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
+  }
+}
+
+async function handleCreateMergedSource(req, res) {
+  try {
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const created = createMergedSource(body || {});
+    if (!created.ok) {
+      sendJson(res, created.status || 400, created);
+      return;
+    }
+    sendJson(res, 201, {
+      ok: true,
+      source: created.source,
+      subUrl: `merge:${created.source.id}`,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
+  }
+}
+
+async function handleGetLocalSource(req, res, id) {
+  const found = getLocalSource(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  sendJson(res, 200, { ok: true, source: found.source, subUrl: `local:${found.source.id}` });
+}
+
+async function handleParseBulkImport(req, res) {
+  try {
+    const body = await readJsonBody(req, 4 * 1024 * 1024);
+    const text = String(body?.text || "");
+    const items = parseBulkProxyText(text);
+    sendJson(res, 200, { ok: true, items });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
+  }
+}
+
 async function handleGetShortLinkUsers(req, res, id) {
   const found = await getShortLink(id);
   if (!found.ok) {
@@ -900,6 +963,8 @@ async function handlePublicShortLinkMeta(req, res, id) {
       if (!v) continue;
       requestUrl.searchParams.set(k, String(v));
     }
+    const typeOverride = resolveShortLinkTypeOverride(new URL(req.url || "/", "http://localhost"));
+    if (typeOverride) requestUrl.searchParams.set("output", typeOverride);
     const config = resolveRequestConfig(requestUrl, {});
     if (!config.ok) {
       sendJson(res, config.status || 400, { ok: false, error: config.error || "invalid request config" });
@@ -989,6 +1054,13 @@ function wantsHtmlSharePage(req) {
   return accept.includes("text/html");
 }
 
+function resolveShortLinkTypeOverride(reqUrl) {
+  const type = String(reqUrl?.searchParams?.get("type") || "").trim().toLowerCase();
+  if (type === "raw") return "raw";
+  if (type === "yml" || type === "yaml" || type === "clash") return "yml";
+  return "";
+}
+
 async function handleShortLinkResolve(req, res, id) {
   const found = await getShortLink(id);
   if (!found.ok) {
@@ -1012,7 +1084,9 @@ async function handleShortLinkResolve(req, res, id) {
 
   await incrementShortLinkHits(found.link.id);
 
-  if (wantsHtmlSharePage(req)) {
+  const reqUrl = new URL(req.url || "/", "http://localhost");
+  const typeOverride = resolveShortLinkTypeOverride(reqUrl);
+  if (!typeOverride && wantsHtmlSharePage(req)) {
     if (!serveFrontendIndex(res)) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(renderHomePage());
@@ -1023,11 +1097,7 @@ async function handleShortLinkResolve(req, res, id) {
   const endpoint = found.link.params.endpoint === "sub" ? "/sub" : "/last";
   const params = { ...(found.link.params || {}) };
   try {
-    const reqUrl = new URL(req.url || "/", "http://localhost");
-    const type = String(reqUrl.searchParams.get("type") || "").trim().toLowerCase();
-    if (type === "raw" || type === "yml" || type === "yaml" || type === "clash") {
-      params.output = type === "raw" ? "raw" : "yml";
-    }
+    if (typeOverride) params.output = typeOverride;
   } catch {
     // ignore malformed query and keep original params
   }
@@ -1386,6 +1456,7 @@ const server = http.createServer(async (req, res) => {
   const shortApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)$/);
   const shortUsersApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users$/);
   const shortUserApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users\/([^/]+)$/);
+  const localSourceApiMatch = routePath.match(/^\/api\/local-sources\/([A-Za-z0-9_-]+)$/);
   const mockApiMatch = routePath.match(/^\/api\/mock-sources\/([A-Za-z0-9_-]+)$/);
   const mockLogsMatch = routePath.match(/^\/api\/mock-sources\/([A-Za-z0-9_-]+)\/logs$/);
   const adminUserApiMatch = routePath.match(/^\/api\/admin\/users\/([a-zA-Z0-9._-]+)$/);
@@ -1528,6 +1599,26 @@ const server = http.createServer(async (req, res) => {
     void handleSubscriptionTest(req, res);
     return;
   }
+  if (req.method === "POST" && routePath === "/api/local-sources") {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleCreateLocalSource(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/merged-sources") {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleCreateMergedSource(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/import/parse") {
+    if (!(await requireApiAuth(req, res))) return;
+    void handleParseBulkImport(req, res);
+    return;
+  }
+  if (req.method === "GET" && localSourceApiMatch) {
+    if (!(await requireApiAuth(req, res))) return;
+    await handleGetLocalSource(req, res, localSourceApiMatch[1]);
+    return;
+  }
   if (req.method === "POST" && routePath === "/api/short-links") {
     if (!(await requireApiAuth(req, res))) return;
     void handleCreateShortLink(req, res);
@@ -1647,7 +1738,10 @@ export {
   readProfileFile,
   profileExists,
   pickUserAgentProfile,
+  resolveLocalSourcePath,
   resolveRequestConfig,
+  resolveShortLinkTypeOverride,
   produceOutput,
+  fetchWithNode,
   startServer,
 };
