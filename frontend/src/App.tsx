@@ -503,6 +503,9 @@ export default function App() {
     if (authEnabled && !authenticated) return;
     void fetchFavoritesRemote()
       .then(async (remote) => {
+        if (authEnabled) {
+          return remote;
+        }
         const local = readFavorites();
         if (remote.length === 0 && local.length > 0) {
           try {
