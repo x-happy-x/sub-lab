@@ -203,6 +203,56 @@ function downloadTextFile(body: string, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
+type FavoritesBackupFile = {
+  version: number;
+  exportedAt: string;
+  account: string;
+  items: FavoriteItem[];
+};
+
+function normalizeFavoriteBackupItem(raw: unknown, index: number): FavoriteItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Record<string, unknown>;
+  const payloadRaw = (item.payload && typeof item.payload === "object") ? item.payload as Record<string, unknown> : {};
+  const endpoint = String(payloadRaw.endpoint || "").trim() === "sub" ? "sub" : "last";
+  const outputToken = String(payloadRaw.output || "").trim();
+  const output = outputToken === "raw" || outputToken === "raw_base64" || outputToken === "json" || outputToken === "yml"
+    ? outputToken
+    : "yml";
+  const subUrl = String(payloadRaw.sub_url || "").trim();
+  if (!subUrl) return null;
+  const title = String(item.title || "").trim() || `Подписка ${index + 1}`;
+  const tsValue = Number(item.ts || 0);
+  return {
+    title,
+    url: String(item.url || "").trim(),
+    payload: {
+      ...defaultPayload(),
+      endpoint,
+      output,
+      sub_url: subUrl,
+      app: String(payloadRaw.app || ""),
+      device: String(payloadRaw.device || ""),
+      profile: String(payloadRaw.profile || ""),
+      profiles: String(payloadRaw.profiles || ""),
+      hwid: String(payloadRaw.hwid || ""),
+    },
+    labels: Array.isArray(item.labels) ? item.labels.map((value) => String(value || "")).filter(Boolean) : [],
+    shortId: String(item.shortId || "").trim() || undefined,
+    ts: Number.isFinite(tsValue) && tsValue > 0 ? tsValue : Date.now() + index,
+  };
+}
+
+function parseFavoritesBackup(value: unknown): FavoriteItem[] {
+  const rawItems = Array.isArray(value)
+    ? value
+    : ((value && typeof value === "object" && Array.isArray((value as { items?: unknown[] }).items)) ? (value as { items: unknown[] }).items : []);
+  return rawItems
+    .map((item, index) => normalizeFavoriteBackupItem(item, index))
+    .filter((item): item is FavoriteItem => Boolean(item))
+    .slice(0, 50);
+}
+
 type ProfileHeaderRow = {
   id: string;
   key: string;
@@ -408,6 +458,7 @@ export default function App() {
   const [publicBaseUrl, setPublicBaseUrl] = useState("");
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const bulkImportFileInputRef = useRef<HTMLInputElement | null>(null);
+  const backupRestoreInputRef = useRef<HTMLInputElement | null>(null);
   const [bulkImportFileName, setBulkImportFileName] = useState("");
   const [bulkImportRaw, setBulkImportRaw] = useState("");
   const [bulkImportItems, setBulkImportItems] = useState<ImportedProxyItem[]>([]);
@@ -582,13 +633,21 @@ export default function App() {
       .finally(() => setShareAccessLoading(false));
   }, [showShare, shareItem?.shortId, isAdminUser, adminUsers]);
 
-  const saveFavorites = (list: FavoriteItem[]) => {
+  const persistFavorites = async (list: FavoriteItem[]) => {
     const next = list.slice(0, 50);
     setFavorites(next);
     writeFavorites(next);
-    if (!authResolved) return;
-    if (authEnabled && !authenticated) return;
-    void saveFavoritesRemote(next).catch(() => {});
+    if (!authResolved) return next;
+    if (authEnabled && !authenticated) return next;
+    const saved = await saveFavoritesRemote(next);
+    const normalized = Array.isArray(saved) ? saved.slice(0, 50) : next;
+    setFavorites(normalized);
+    writeFavorites(normalized);
+    return normalized;
+  };
+
+  const saveFavorites = (list: FavoriteItem[]) => {
+    void persistFavorites(list).catch(() => {});
   };
 
   const dismissNotification = (id: string) => {
@@ -741,6 +800,38 @@ export default function App() {
       setStatus((e as Error)?.message || "Не удалось импортировать файл");
     } finally {
       event.target.value = "";
+    }
+  };
+
+  const downloadFavoritesBackup = () => {
+    const payload: FavoritesBackupFile = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      account: authUser?.username || "",
+      items: favorites,
+    };
+    const stamp = payload.exportedAt.replace(/[:.]/g, "-");
+    downloadTextFile(JSON.stringify(payload, null, 2), `sub-lab-backup-${stamp}.json`);
+    notify("success", `Экспортировано подписок: ${favorites.length}`);
+  };
+
+  const handleRestoreFavoritesBackup = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as unknown;
+      const items = parseFavoritesBackup(parsed);
+      if (items.length === 0) {
+        throw new Error("В файле не найдено ни одной подписки");
+      }
+      const confirmed = window.confirm(`Заменить текущий список подписок (${favorites.length}) на ${items.length} из резервной копии?`);
+      if (!confirmed) return;
+      await persistFavorites(items);
+      notify("success", `Восстановлено подписок: ${items.length}`);
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось восстановить резервную копию");
     }
   };
 
@@ -1867,6 +1958,13 @@ export default function App() {
         <TipButton tip="Импортировать массовый файл прокси" className="btn" onClick={openBulkImportModal}>
           <ImportIcon className="btn-icon" /> Массовый импорт
         </TipButton>
+        <TipButton tip="Скачать резервную копию всех доступных подписок" className="btn" onClick={downloadFavoritesBackup}>
+          <SaveIcon className="btn-icon" /> Резервная копия
+        </TipButton>
+        <TipButton tip="Восстановить подписки из резервной копии" className="btn" onClick={() => backupRestoreInputRef.current?.click()}>
+          <ImportIcon className="btn-icon" /> Восстановить
+        </TipButton>
+        <input ref={backupRestoreInputRef} type="file" accept="application/json,.json" hidden onChange={(e) => void handleRestoreFavoritesBackup(e)} />
         <TipButton tip="Добавить новую подписку" tone="primary" className="btn" onClick={() => { resetComposer(); openModal("composer"); }}>
           <PlusIcon className="btn-icon" /> Добавить
         </TipButton>
