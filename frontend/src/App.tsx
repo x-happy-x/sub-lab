@@ -187,13 +187,18 @@ function buildFullUrlWithOrigin(payload: SubscriptionPayload, origin: string): s
 }
 
 function normalizePublicBaseUrl(raw: string): string {
+  const browserOrigin = String(window.location.origin || "").trim();
   const value = String(raw || "").trim();
-  if (!value) return "";
+  if (!value) return browserOrigin;
   try {
     const parsed = new URL(value);
+    const browser = browserOrigin ? new URL(browserOrigin) : null;
+    if (browser && browser.hostname && !["localhost", "127.0.0.1", "::1"].includes(browser.hostname.toLowerCase())) {
+      return `${browser.protocol}//${browser.host}`;
+    }
     return `${parsed.protocol}//${parsed.host}`;
   } catch {
-    return "";
+    return browserOrigin;
   }
 }
 

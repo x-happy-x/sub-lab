@@ -10,6 +10,7 @@ frontend/tsconfig.tsbuildinfo
 # IDE/secrets
 .idea/
 homeserver
+deploy-direct.local.sh
 .codex
 .tmp-test-data/
 sub-mirror.zip

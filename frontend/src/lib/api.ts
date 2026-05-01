@@ -16,6 +16,39 @@ import type { FavoriteItem } from "../types";
 
 const PARAM_KEYS = ["sub_url", "endpoint", "output", "app", "device", "profile", "profiles", "hwid"] as const;
 
+function currentBrowserOrigin(): string {
+  if (typeof window === "undefined" || !window.location?.origin) return "";
+  return String(window.location.origin || "").trim();
+}
+
+function isLocalHostname(hostname: string): boolean {
+  const token = String(hostname || "").trim().toLowerCase();
+  return token === "localhost" || token === "127.0.0.1" || token === "::1";
+}
+
+function rewriteUrlToBrowserOrigin(raw: string): string {
+  const value = String(raw || "").trim();
+  const browserOrigin = currentBrowserOrigin();
+  if (!value || !browserOrigin) return value;
+  try {
+    const browserUrl = new URL(browserOrigin);
+    if (isLocalHostname(browserUrl.hostname)) return value;
+    const parsed = new URL(value, browserOrigin);
+    parsed.protocol = browserUrl.protocol;
+    parsed.host = browserUrl.host;
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
+function normalizeFavoriteUrl(item: FavoriteItem): FavoriteItem {
+  return {
+    ...item,
+    url: rewriteUrlToBrowserOrigin(String(item.url || "")),
+  };
+}
+
 export async function fetchAuthState(): Promise<{ enabled: boolean; authenticated: boolean; user: AuthUser | null; publicBaseUrl: string }> {
   const resp = await fetch("/api/auth/me");
   const json = await resp.json();
@@ -63,7 +96,7 @@ export async function createShortLink(payload: SubscriptionPayload, title = ""):
   });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link create failed");
-  return { id: json.link.id, shortUrl: json.urls.shortUrl };
+  return { id: json.link.id, shortUrl: rewriteUrlToBrowserOrigin(String(json.urls.shortUrl || "")) };
 }
 
 export async function updateShortLink(id: string, payload: SubscriptionPayload, title = ""): Promise<void> {
@@ -635,7 +668,7 @@ export async function fetchFavorites(): Promise<FavoriteItem[]> {
             : (String(item.permissions.accessLevel || "") === "view" ? "view" : ""),
         } as ShortLinkPermissions
         : undefined;
-      return { ...item, permissions };
+      return normalizeFavoriteUrl({ ...item, permissions });
     })
     : [];
 }
@@ -648,5 +681,5 @@ export async function saveFavorites(list: FavoriteItem[]): Promise<FavoriteItem[
   });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "favorites save failed");
-  return Array.isArray(json.favorites) ? json.favorites as FavoriteItem[] : [];
+  return Array.isArray(json.favorites) ? (json.favorites as FavoriteItem[]).map((item) => normalizeFavoriteUrl(item)) : [];
 }
