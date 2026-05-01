@@ -186,6 +186,16 @@ function buildFullUrlWithOrigin(payload: SubscriptionPayload, origin: string): s
   return `${origin}/${endpoint}?${params.toString()}`;
 }
 
+function rewriteFavoriteUrlToOrigin(item: FavoriteItem, origin: string): FavoriteItem {
+  const nextUrl = item.shortId
+    ? `${origin}/l/${encodeURIComponent(item.shortId)}`
+    : buildFullUrlWithOrigin(item.payload, origin);
+  return {
+    ...item,
+    url: nextUrl,
+  };
+}
+
 function normalizePublicBaseUrl(raw: string): string {
   const browserOrigin = String(window.location.origin || "").trim();
   const value = String(raw || "").trim();
@@ -887,6 +897,16 @@ export default function App() {
     const stamp = payload.exportedAt.replace(/[:.]/g, "-");
     downloadTextFile(JSON.stringify(payload, null, 2), `sub-lab-backup-${stamp}.json`);
     notify("success", `Экспортировано подписок: ${favorites.length}`);
+  };
+
+  const rewriteFavoritesToCurrentOrigin = async () => {
+    try {
+      const next = favorites.map((item) => rewriteFavoriteUrlToOrigin(item, effectiveOrigin));
+      await persistFavorites(next);
+      notify("success", "Ссылки обновлены на текущий домен");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось обновить ссылки");
+    }
   };
 
   const handleRestoreFavoritesBackup = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -2277,6 +2297,9 @@ export default function App() {
         </TipButton>
         <TipButton tip="Скачать резервную копию всех доступных подписок" className="btn" onClick={downloadFavoritesBackup}>
           <SaveIcon className="btn-icon" /> Резервная копия
+        </TipButton>
+        <TipButton tip="Переписать все сохраненные ссылки на текущий домен" className="btn" onClick={() => void rewriteFavoritesToCurrentOrigin()}>
+          <CopyIcon className="btn-icon" /> Обновить ссылки
         </TipButton>
         <TipButton tip="Восстановить подписки из резервной копии" className="btn" onClick={() => backupRestoreInputRef.current?.click()}>
           <ImportIcon className="btn-icon" /> Восстановить
