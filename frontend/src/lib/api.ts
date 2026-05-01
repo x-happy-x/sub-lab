@@ -1,8 +1,10 @@
 import type {
   AuthUser,
   ImportedProxyItem,
+  MockLogEntry,
   MockSource,
   ProfileCatalog,
+  ProfileCatalogItem,
   ShortLinkAccessGrant,
   ShortLinkPermissions,
   ShortLinkUsersData,
@@ -365,7 +367,22 @@ export async function fetchProfileCatalog(): Promise<ProfileCatalog> {
   const resp = await fetch("/api/profile-editor/list");
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "profile catalog failed");
-  return json.catalog as ProfileCatalog;
+  const catalog = (json.catalog || {}) as Record<string, unknown>;
+  return {
+    profiles: Array.isArray(catalog.profiles) ? catalog.profiles.map((x: unknown) => String(x || "")) : [],
+    items: Array.isArray(catalog.items)
+      ? catalog.items.map((row: unknown) => {
+        const item = (row || {}) as Record<string, unknown>;
+        return {
+          name: String(item.name || ""),
+          ownerUsername: String(item.ownerUsername || ""),
+          editable: Boolean(item.editable),
+          visibility: String(item.visibility || "") === "private" ? "private" : "shared",
+          source: String(item.source || "") === "custom" ? "custom" : "builtin",
+        } as ProfileCatalogItem;
+      }).filter((item) => item.name)
+      : [],
+  };
 }
 
 export async function fetchUaCatalog(): Promise<UACatalog> {
@@ -490,7 +507,9 @@ export async function deleteProfile(name: string): Promise<void> {
   if (!resp.ok || !json.ok) throw new Error(json.error || "profile delete failed");
 }
 
-export async function createMockSource(config: Partial<MockSource["config"]>): Promise<MockSource> {
+export async function createMockSource(
+  config: Partial<MockSource["config"]> & { mode?: string; label?: string },
+): Promise<MockSource> {
   const resp = await fetch("/api/mock-sources", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -508,7 +527,10 @@ export async function getMockSource(id: string): Promise<MockSource> {
   return json.source as MockSource;
 }
 
-export async function updateMockSource(id: string, config: Partial<MockSource["config"]>): Promise<MockSource> {
+export async function updateMockSource(
+  id: string,
+  config: Partial<MockSource["config"]> & { mode?: string; label?: string },
+): Promise<MockSource> {
   const resp = await fetch(`/api/mock-sources/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -519,11 +541,30 @@ export async function updateMockSource(id: string, config: Partial<MockSource["c
   return json.source as MockSource;
 }
 
-export async function getMockLogs(id: string): Promise<unknown[]> {
+export async function getMockLogs(id: string): Promise<MockLogEntry[]> {
   const resp = await fetch(`/api/mock-sources/${encodeURIComponent(id)}/logs`);
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "mock logs failed");
-  return Array.isArray(json.logs) ? json.logs : [];
+  return Array.isArray(json.logs)
+    ? json.logs.map((row: unknown) => {
+      const item = (row || {}) as Record<string, unknown>;
+      const headersRaw = (item.headers && typeof item.headers === "object") ? item.headers as Record<string, unknown> : {};
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(headersRaw)) {
+        headers[String(key || "").toLowerCase()] = String(value ?? "");
+      }
+      return {
+        ts: String(item.ts || ""),
+        method: String(item.method || "GET"),
+        path: String(item.path || ""),
+        query: (item.query && typeof item.query === "object") ? item.query as Record<string, unknown> : {},
+        headers,
+        body: String(item.body || ""),
+        bodyBase64: String(item.bodyBase64 || ""),
+        bodyBytes: Number(item.bodyBytes || 0),
+      } as MockLogEntry;
+    })
+    : [];
 }
 
 export async function clearMockLogs(id: string): Promise<void> {

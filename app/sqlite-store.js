@@ -187,6 +187,14 @@ function runMigrations(db) {
       updated_at TEXT NOT NULL
     );
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS profile_files (
+      name TEXT PRIMARY KEY,
+      owner_username TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
   db.run("CREATE INDEX IF NOT EXISTS idx_subscription_feeds_updated ON subscription_feeds (updated_at DESC)");
   db.run("CREATE INDEX IF NOT EXISTS idx_source_snapshots_feed_fetch ON source_snapshots (feed_id, fetched_at DESC, id DESC)");
   db.run("CREATE INDEX IF NOT EXISTS idx_normalized_snapshots_feed_source ON normalized_snapshots (feed_id, source_snapshot_id DESC)");
@@ -909,6 +917,83 @@ async function getFavoritesRow(accountKey) {
   } catch {
     return [];
   }
+}
+
+async function listProfileFileRecords() {
+  const db = await getDb();
+  const stmt = db.prepare(`
+    SELECT name, owner_username, created_at, updated_at
+    FROM profile_files
+    ORDER BY name ASC
+  `);
+  const rows = rowsFromStmt(stmt);
+  stmt.free();
+  return rows.map((row) => ({
+    name: String(row.name || "").trim(),
+    ownerUsername: normalizeUsername(row.owner_username),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+  })).filter((row) => row.name);
+}
+
+async function getProfileFileRecord(name) {
+  const db = await getDb();
+  const token = String(name || "").trim();
+  if (!token) return null;
+  const stmt = db.prepare(`
+    SELECT name, owner_username, created_at, updated_at
+    FROM profile_files
+    WHERE name = ?
+    LIMIT 1
+  `);
+  stmt.bind([token]);
+  const row = rowFromStmt(stmt);
+  stmt.free();
+  if (!row) return null;
+  return {
+    name: String(row.name || "").trim(),
+    ownerUsername: normalizeUsername(row.owner_username),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+  };
+}
+
+async function upsertProfileFileRecord(name, ownerUsername) {
+  const db = await getDb();
+  const token = String(name || "").trim();
+  const owner = normalizeUsername(ownerUsername);
+  if (!token) throw new Error("profile name is required");
+  const existing = await getProfileFileRecord(token);
+  const createdAt = existing?.createdAt || nowIso();
+  const updatedAt = nowIso();
+  const stmt = db.prepare(`
+    INSERT INTO profile_files (name, owner_username, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET
+      owner_username = excluded.owner_username,
+      updated_at = excluded.updated_at
+  `);
+  stmt.run([token, owner, createdAt, updatedAt]);
+  stmt.free();
+  saveDb(db);
+  return {
+    name: token,
+    ownerUsername: owner,
+    createdAt,
+    updatedAt,
+  };
+}
+
+async function deleteProfileFileRecord(name) {
+  const db = await getDb();
+  const token = String(name || "").trim();
+  if (!token) return false;
+  const stmt = db.prepare("DELETE FROM profile_files WHERE name = ?");
+  stmt.run([token]);
+  const changed = Number(db.getRowsModified() || 0) > 0;
+  stmt.free();
+  if (changed) saveDb(db);
+  return changed;
 }
 
 async function setFavoritesRow(accountKey, favorites) {
@@ -1750,6 +1835,10 @@ export {
   updateShortLinkUserPolicy,
   setShortLinkUserBlocked,
   deleteShortLinkUser,
+  listProfileFileRecords,
+  getProfileFileRecord,
+  upsertProfileFileRecord,
+  deleteProfileFileRecord,
   upsertSubscriptionFeed,
   getSubscriptionFeedByKey,
   createSourceSnapshot,

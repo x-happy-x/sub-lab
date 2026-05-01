@@ -111,6 +111,22 @@ function sanitizeConfig(input, prev = null) {
   };
 }
 
+function sanitizeTextToken(value, maxLength = 128) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function sanitizeUsername(value) {
+  return sanitizeTextToken(value, 128).toLowerCase();
+}
+
+function sanitizeMeta(input, prev = null) {
+  return {
+    ownerUsername: sanitizeUsername(input?.ownerUsername ?? prev?.ownerUsername),
+    mode: sanitizeTextToken(input?.mode ?? prev?.mode ?? "generic", 32) || "generic",
+    label: sanitizeTextToken(input?.label ?? prev?.label ?? "", 160),
+  };
+}
+
 function createMockSource(config) {
   const store = readStore();
   const id = crypto.randomBytes(5).toString("base64url");
@@ -119,6 +135,7 @@ function createMockSource(config) {
     id,
     createdAt: now,
     updatedAt: now,
+    meta: sanitizeMeta(config),
     config: sanitizeConfig(config),
     logs: [],
   };
@@ -150,6 +167,7 @@ function updateMockSource(id, patch) {
   }
 
   source.config = sanitizeConfig(patch, source.config);
+  source.meta = sanitizeMeta(patch, source.meta);
   source.updatedAt = new Date().toISOString();
   writeStore(store);
   return { ok: true, source };

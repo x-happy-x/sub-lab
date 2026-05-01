@@ -102,6 +102,15 @@ export type SubTestResponse = {
 
 export type ProfileCatalog = {
   profiles: string[];
+  items?: ProfileCatalogItem[];
+};
+
+export type ProfileCatalogItem = {
+  name: string;
+  ownerUsername: string;
+  editable: boolean;
+  visibility: "shared" | "private";
+  source: "builtin" | "custom";
 };
 
 export type UACatalog = {
@@ -122,6 +131,22 @@ export type MockSource = {
   id: string;
   config: MockSourceConfig;
   logsCount?: number;
+  meta?: {
+    ownerUsername?: string;
+    mode?: string;
+    label?: string;
+  };
+};
+
+export type MockLogEntry = {
+  ts: string;
+  method: string;
+  path: string;
+  query?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  body?: string;
+  bodyBase64?: string;
+  bodyBytes?: number;
 };
 
 export type AuthUser = {

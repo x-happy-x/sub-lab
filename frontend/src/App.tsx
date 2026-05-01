@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ComponentProps } from "react";
-import type { AuthUser, FavoriteItem, ImportedProxyItem, MockSource, ProfileCatalog, ShortLinkAccessGrant, ShortLinkUsersData, SubscriptionPayload, SubTestResponse, UACatalog } from "./types";
+import type {
+  AuthUser,
+  FavoriteItem,
+  ImportedProxyItem,
+  MockLogEntry,
+  MockSource,
+  ProfileCatalog,
+  ProfileCatalogItem,
+  ShortLinkAccessGrant,
+  ShortLinkUsersData,
+  SubscriptionPayload,
+  SubTestResponse,
+  UACatalog,
+} from "./types";
 import { readFavorites, writeFavorites } from "./lib/storage";
 import {
   clearMockLogs,
@@ -264,6 +277,8 @@ type ProfileFormState = {
   headers: ProfileHeaderRow[];
 };
 
+type AppTestStep = 1 | 2 | 3;
+
 function unquoteYamlValue(value: string): string {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -333,6 +348,46 @@ function buildProfileFormYaml(state: ProfileFormState): string {
   return `${lines.join("\n")}\n`;
 }
 
+function getHeaderValue(headers: Record<string, string>, keys: string[]): string {
+  for (const key of keys) {
+    const value = String(headers[String(key || "").toLowerCase()] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function buildProfileFormFromHeaders(headers: Record<string, string>): ProfileFormState {
+  const skip = new Set(["host", "connection", "accept-encoding", "content-length", "origin", "referer"]);
+  const keys = Object.keys(headers)
+    .map((key) => String(key || "").trim().toLowerCase())
+    .filter((key) => key && !skip.has(key))
+    .sort((a, b) => a.localeCompare(b));
+  return {
+    allowHwidOverride: !getHeaderValue(headers, ["x-hwid", "x-device-id"]),
+    headers: keys.map((key) => ({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      key,
+      value: String(headers[key] || ""),
+    })),
+  };
+}
+
+function sanitizeProfileNameToken(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function buildCapturedProfileName(username: string, app: string): string {
+  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 12);
+  const user = sanitizeProfileNameToken(username || "user") || "user";
+  const appToken = sanitizeProfileNameToken(app || "client") || "client";
+  return `capture-${user}-${appToken}-${stamp}`;
+}
+
 function randomHex(length: number): string {
   const bytes = new Uint8Array(Math.ceil(length / 2));
   window.crypto.getRandomValues(bytes);
@@ -367,7 +422,7 @@ function generateHwidByOs(os: string): string {
 }
 
 export default function App() {
-  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "profileEditor" | "share" | "subUsers" | "overrides";
+  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "appTest" | "profileEditor" | "share" | "subUsers" | "overrides";
   const [theme, setTheme] = useState<"claude" | "claude-dark">(() => {
     const saved = localStorage.getItem("submirror-theme");
     if (saved === "claude" || saved === "claude-dark") return saved;
@@ -407,6 +462,7 @@ export default function App() {
   const [showMerge, setShowMerge] = useState(false);
   const [showTester, setShowTester] = useState(false);
   const [showMock, setShowMock] = useState(false);
+  const [showAppTest, setShowAppTest] = useState(false);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [showSubUsers, setShowSubUsers] = useState(false);
@@ -455,6 +511,14 @@ export default function App() {
   const [mockBody, setMockBody] = useState("");
   const [mockLogs, setMockLogs] = useState("");
   const [mockTestTarget, setMockTestTarget] = useState("__current__");
+  const [appTestStep, setAppTestStep] = useState<AppTestStep>(1);
+  const [appTestSource, setAppTestSource] = useState<MockSource | null>(null);
+  const [appTestLogs, setAppTestLogs] = useState<MockLogEntry[]>([]);
+  const [appTestLoading, setAppTestLoading] = useState(false);
+  const [appTestStatus, setAppTestStatus] = useState("");
+  const [appTestSelectedApp, setAppTestSelectedApp] = useState("");
+  const [appTestProfileName, setAppTestProfileName] = useState("");
+  const [appTestSavingProfile, setAppTestSavingProfile] = useState(false);
   const [publicBaseUrl, setPublicBaseUrl] = useState("");
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
   const bulkImportFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -554,7 +618,7 @@ export default function App() {
     : ((publicTypeOverrideRaw === "yml" || publicTypeOverrideRaw === "yaml" || publicTypeOverrideRaw === "clash") ? "yml" : "");
   const isAdminUser = authUser?.role === "admin";
   const isMainPath = !isAdminPath && !publicShareId;
-  const isAnyModalOpen = showImport || showComposer || showBulkImport || showMerge || showTester || showMock || showProfileEditor || showShare || showSubUsers || showOverrides;
+  const isAnyModalOpen = showImport || showComposer || showBulkImport || showMerge || showTester || showMock || showAppTest || showProfileEditor || showShare || showSubUsers || showOverrides;
 
   const refreshAdminUsers = async () => {
     const list = await adminListUsers();
@@ -664,6 +728,7 @@ export default function App() {
     setShowMerge(false);
     setShowTester(false);
     setShowMock(false);
+    setShowAppTest(false);
     setShowProfileEditor(false);
     setShowShare(false);
     setShowSubUsers(false);
@@ -678,6 +743,7 @@ export default function App() {
     if (kind === "merge") setShowMerge(true);
     if (kind === "tester") setShowTester(true);
     if (kind === "mock") setShowMock(true);
+    if (kind === "appTest") setShowAppTest(true);
     if (kind === "profileEditor") setShowProfileEditor(true);
     if (kind === "share") setShowShare(true);
     if (kind === "subUsers") setShowSubUsers(true);
@@ -1111,12 +1177,31 @@ export default function App() {
     () => adminUsers.filter((user) => user.role !== "admin").sort((a, b) => a.username.localeCompare(b.username)),
     [adminUsers],
   );
+  const selectedProfileMeta = useMemo<ProfileCatalogItem | null>(
+    () => profileCatalog.items?.find((item) => item.name === profileName) || null,
+    [profileCatalog.items, profileName],
+  );
   const uaPreview = useMemo(() => {
     const os = selectedOs || String(payload.device || "");
     const app = String(payload.app || "");
     if (!os || !app) return uaCatalog.defaultUa || "";
     return uaCatalog.options?.[os]?.[app] || uaCatalog.defaultUa || "";
   }, [selectedOs, payload.device, payload.app, uaCatalog]);
+  const appTestUrl = String(appTestSource?.id || "").trim() ? `${effectiveOrigin}/mock/${appTestSource?.id}` : "";
+  const appTestLatestLog = appTestLogs[0] || null;
+  const appTestHeaders = useMemo<Record<string, string>>(
+    () => appTestLatestLog?.headers || {},
+    [appTestLatestLog],
+  );
+  const appTestSummary = useMemo(() => ({
+    userAgent: getHeaderValue(appTestHeaders, ["user-agent"]),
+    hwid: getHeaderValue(appTestHeaders, ["x-hwid"]),
+    deviceModel: getHeaderValue(appTestHeaders, ["x-device-model"]),
+    deviceOs: getHeaderValue(appTestHeaders, ["x-device-os"]),
+    app: getHeaderValue(appTestHeaders, ["x-app", "x-client-app"]),
+    acceptLanguage: getHeaderValue(appTestHeaders, ["accept-language"]),
+    contentType: getHeaderValue(appTestHeaders, ["content-type"]),
+  }), [appTestHeaders]);
 
   useEffect(() => {
     if (osOptions.length === 0) return;
@@ -1383,6 +1468,115 @@ export default function App() {
       .join(link);
   };
 
+  useEffect(() => {
+    if (!showAppTest) return;
+    if (appTestSelectedApp && shareApps.some((item) => item.key === appTestSelectedApp)) return;
+    const preferred = String(payload.app || "").trim().toLowerCase();
+    const next = shareApps.find((item) => item.key === preferred) || shareApps[0] || null;
+    if (next?.key) setAppTestSelectedApp(next.key);
+  }, [showAppTest, appTestSelectedApp, shareApps, payload.app]);
+
+  useEffect(() => {
+    if (!showAppTest || !appTestSource?.id) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const logs = await getMockLogs(appTestSource.id);
+        if (stopped) return;
+        setAppTestLogs(logs);
+        if (logs.length > 0) {
+          setAppTestStep(3);
+          setAppTestStatus("Запрос получен. Можно изучить заголовки и сохранить профиль.");
+          setAppTestProfileName((prev) => prev || buildCapturedProfileName(authUser?.username || "", appTestSummary.app || appTestSelectedApp || payload.app || ""));
+        }
+      } catch (e) {
+        if (stopped) return;
+        setAppTestStatus((e as Error)?.message || "Не удалось обновить лог теста приложения");
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [showAppTest, appTestSource?.id, authUser?.username, appTestSelectedApp, payload.app, appTestSummary.app]);
+
+  const openAppTestModal = () => {
+    setAppTestStep(1);
+    setAppTestSource(null);
+    setAppTestLogs([]);
+    setAppTestLoading(false);
+    setAppTestStatus("");
+    setAppTestProfileName("");
+    openModal("appTest");
+  };
+
+  const createAppTestSession = async () => {
+    try {
+      setAppTestLoading(true);
+      setAppTestStatus("");
+      const source = await createMockSource({
+        preset: payload.output === "yml" ? "stub_clash" : "stub_raw",
+        status: 200,
+        contentType: payload.output === "yml" ? "text/yaml; charset=utf-8" : "text/plain; charset=utf-8",
+        mode: "app_test",
+        label: `app-test:${authUser?.username || "user"}`,
+      });
+      setAppTestSource(source);
+      setAppTestLogs([]);
+      setAppTestStep(2);
+      setAppTestStatus("Временный URL готов. Вставьте его в приложение или откройте через deeplink-кнопку ниже.");
+    } catch (e) {
+      setAppTestStatus((e as Error)?.message || "Не удалось создать тестовый URL");
+      notify("error", (e as Error)?.message || "Не удалось создать тестовый URL");
+    } finally {
+      setAppTestLoading(false);
+    }
+  };
+
+  const resetAppTestCapture = async () => {
+    if (!appTestSource?.id) return;
+    try {
+      await clearMockLogs(appTestSource.id);
+      setAppTestLogs([]);
+      setAppTestStep(2);
+      setAppTestStatus("Логи очищены. Можно повторить тест другим приложением.");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось очистить логи теста");
+    }
+  };
+
+  const saveCapturedProfile = async () => {
+    if (!appTestLatestLog) {
+      notify("warning", "Сначала дождитесь запроса от приложения");
+      return;
+    }
+    const token = sanitizeProfileNameToken(appTestProfileName);
+    if (!token) {
+      notify("warning", "Укажите имя профиля");
+      return;
+    }
+    try {
+      setAppTestSavingProfile(true);
+      const form = buildProfileFormFromHeaders(appTestHeaders);
+      const content = buildProfileFormYaml(form);
+      await saveProfile(token, content);
+      const catalog = await fetchProfileCatalog();
+      setProfileCatalog(catalog);
+      setProfileName(token);
+      setProfileContent(content);
+      setProfileForm(form);
+      setAppTestStatus(`Профиль ${token} сохранен`);
+      notify("success", `Профиль ${token} сохранен`);
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось сохранить профиль");
+      setAppTestStatus((e as Error)?.message || "Не удалось сохранить профиль");
+    } finally {
+      setAppTestSavingProfile(false);
+    }
+  };
+
   const tryLogin = async () => {
     try {
       setAuthError("");
@@ -1601,6 +1795,102 @@ export default function App() {
     </div>
   );
 
+  const appTestModalContent = (
+    <div className="app-test-layout">
+      <section className={`app-test-step ${appTestStep === 1 ? "active" : ""}`}>
+        <h3 className="editor-heading">1. Создайте временный URL</h3>
+        <div className="status">
+          Этот URL нужен только для диагностики. Приложение запросит его как обычную подписку, а мы покажем все ключевые заголовки и тело запроса.
+        </div>
+        <div className="toolbar">
+          <TipButton tip="Создать временный диагностический URL" tone="primary" className="btn" onClick={() => void createAppTestSession()} disabled={appTestLoading}>
+            {appTestLoading ? "Создание..." : "Создать временный URL"}
+          </TipButton>
+        </div>
+      </section>
+
+      <section className={`app-test-step ${appTestStep === 2 ? "active" : ""}`}>
+        <h3 className="editor-heading">2. Откройте URL в приложении</h3>
+        <div className="composer-meta-hint">
+          Можно просто скопировать URL вручную или сразу открыть подходящее приложение через deeplink-кнопку.
+        </div>
+        <TextInput value={appTestUrl} onChange={() => {}} readOnly placeholder="Сначала создайте временный URL" />
+        <div className="toolbar">
+          <TipButton tip="Скопировать тестовый URL" className="btn" onClick={() => void copyToClipboard(appTestUrl)} disabled={!appTestUrl}>
+            <CopyIcon className="btn-icon" /> Копировать URL
+          </TipButton>
+        </div>
+        <div className="chip-row">
+          {shareApps.map((item) => (
+            <TipChipButton
+              key={item.key}
+              tip={`Открыть через ${item.label}`}
+              className={`chip-btn ${appTestSelectedApp === item.key ? "active" : ""}`}
+              onClick={() => setAppTestSelectedApp(item.key)}
+            >
+              {item.label}
+            </TipChipButton>
+          ))}
+        </div>
+        <div className="toolbar">
+          <TipButton
+            tip="Открыть deeplink выбранного приложения"
+            className="btn"
+            onClick={() => {
+              const deeplink = buildAppShareLink(appTestSelectedApp, appTestUrl);
+              if (!deeplink) {
+                notify("warning", "Для этого приложения нет deeplink-шаблона");
+                return;
+              }
+              window.location.href = deeplink;
+            }}
+            disabled={!appTestUrl || !appTestSelectedApp}
+          >
+            Открыть в {appTestSelectedApp || "приложении"}
+          </TipButton>
+        </div>
+        <div className="status">
+          После первого запроса шаг автоматически переключится на результат. Ожидание можно держать открытым.
+        </div>
+      </section>
+
+      <section className={`app-test-step ${appTestStep === 3 ? "active" : ""}`}>
+        <h3 className="editor-heading">3. Что прислало приложение</h3>
+        <div className="result-grid app-test-summary-grid">
+          <div className="result"><strong>UA</strong><div>{appTestSummary.userAgent || "—"}</div></div>
+          <div className="result"><strong>x-hwid</strong><div>{appTestSummary.hwid || "—"}</div></div>
+          <div className="result"><strong>x-device-os</strong><div>{appTestSummary.deviceOs || "—"}</div></div>
+          <div className="result"><strong>x-device-model</strong><div>{appTestSummary.deviceModel || "—"}</div></div>
+          <div className="result"><strong>x-app</strong><div>{appTestSummary.app || "—"}</div></div>
+          <div className="result"><strong>Метод</strong><div>{appTestLatestLog?.method || "—"}</div></div>
+        </div>
+        <div className="composer-meta-hint">
+          Путь: {appTestLatestLog?.path || "—"} · Язык: {appTestSummary.acceptLanguage || "—"} · Content-Type: {appTestSummary.contentType || "—"} · Body bytes: {appTestLatestLog?.bodyBytes || 0}
+        </div>
+        <label className="composer-label">Имя профиля</label>
+        <div className="row">
+          <TextInput placeholder="capture-myapp-..." value={appTestProfileName} onChange={(e) => setAppTestProfileName(e.target.value)} />
+          <TipButton tip="Сохранить профиль из пойманных заголовков" tone="primary" className="btn" onClick={() => void saveCapturedProfile()} disabled={appTestSavingProfile || !appTestLatestLog}>
+            {appTestSavingProfile ? "Сохранение..." : "Создать профиль"}
+          </TipButton>
+        </div>
+        <div className="toolbar">
+          <TipButton tip="Очистить логи и запустить тест заново" className="btn" onClick={() => void resetAppTestCapture()} disabled={!appTestSource?.id}>
+            Очистить и повторить
+          </TipButton>
+        </div>
+        <label className="composer-label">Все заголовки</label>
+        <pre className="json">{JSON.stringify(appTestHeaders, null, 2) || "{}"}</pre>
+        <label className="composer-label">Query</label>
+        <pre className="json">{JSON.stringify(appTestLatestLog?.query || {}, null, 2)}</pre>
+        <label className="composer-label">Тело запроса</label>
+        <pre className="json">{appTestLatestLog?.body || "Пусто"}</pre>
+      </section>
+
+      {appTestStatus ? <div className="status">{appTestStatus}</div> : null}
+    </div>
+  );
+
   if (publicShareId) {
     const publicFullUrl = publicSharePayload ? buildFullUrlWithOrigin(publicSharePayload, effectiveOrigin) : "";
     return (
@@ -1746,6 +2036,11 @@ export default function App() {
               <span className="admin-tool-title">Тестовый сервер</span>
               <span className="admin-tool-text">Проверка источников, пресеты, логирование и отладка ответа.</span>
             </button>
+            <button type="button" className="admin-tool-card" onClick={openAppTestModal}>
+              <span className="admin-tool-icon"><FlaskIcon className="btn-icon" /></span>
+              <span className="admin-tool-title">Тест приложения</span>
+              <span className="admin-tool-text">Пошаговый capture реального запроса из клиента и сбор профиля.</span>
+            </button>
             <button type="button" className="admin-tool-card" onClick={() => openModal("profileEditor")}>
               <span className="admin-tool-icon"><ProfileIcon className="btn-icon" /></span>
               <span className="admin-tool-title">Профили и UA</span>
@@ -1841,6 +2136,12 @@ export default function App() {
           </Modal>
         ) : null}
 
+        {showAppTest ? (
+          <Modal onClose={() => setShowAppTest(false)} title="Тест приложения" showCloseButton>
+            {appTestModalContent}
+          </Modal>
+        ) : null}
+
         {showProfileEditor ? (
           <Modal onClose={() => setShowProfileEditor(false)} title="Редактор профилей и UA" showCloseButton>
             <div className="editor-layout">
@@ -1853,6 +2154,11 @@ export default function App() {
                   </select>
                   <TextInput placeholder="или имя нового профиля" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
                 </div>
+                {selectedProfileMeta ? (
+                  <div className="composer-meta-hint">
+                    Владелец: {selectedProfileMeta.ownerUsername || "shared"} · Тип: {selectedProfileMeta.visibility}
+                  </div>
+                ) : null}
                 <div className="profile-form-card">
                   <label className="composer-label">Переопределение HWID</label>
                   <div className="chip-row">
@@ -1960,6 +2266,9 @@ export default function App() {
         </TipButton>
         <TipButton tip="Импортировать массовый файл прокси" className="btn" onClick={openBulkImportModal}>
           <ImportIcon className="btn-icon" /> Массовый импорт
+        </TipButton>
+        <TipButton tip="Пошагово проверить, какие заголовки реально отправляет приложение" className="btn" onClick={openAppTestModal}>
+          <FlaskIcon className="btn-icon" /> Тест приложения
         </TipButton>
         <TipButton tip="Скачать резервную копию всех доступных подписок" className="btn" onClick={downloadFavoritesBackup}>
           <SaveIcon className="btn-icon" /> Резервная копия
@@ -2322,6 +2631,12 @@ export default function App() {
         </Modal>
       ) : null}
 
+      {showAppTest ? (
+        <Modal onClose={() => setShowAppTest(false)} title="Тест приложения" showCloseButton>
+          {appTestModalContent}
+        </Modal>
+      ) : null}
+
       {showProfileEditor ? (
         <Modal onClose={() => setShowProfileEditor(false)} title="Редактор профилей и UA" showCloseButton>
           <div className="editor-layout">
@@ -2334,6 +2649,11 @@ export default function App() {
                 </select>
                 <TextInput placeholder="или имя нового профиля" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
               </div>
+              {selectedProfileMeta ? (
+                <div className="composer-meta-hint">
+                  Владелец: {selectedProfileMeta.ownerUsername || "shared"} · Тип: {selectedProfileMeta.visibility}
+                </div>
+              ) : null}
               <div className="profile-form-card">
                 <label className="composer-label">Переопределение HWID</label>
                 <div className="chip-row">

@@ -1050,6 +1050,30 @@ textarea {
   gap: 10px;
 }
 
+.app-test-layout {
+  display: grid;
+  gap: 10px;
+}
+
+.app-test-step {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: color-mix(in srgb, var(--paper) 93%, transparent);
+  opacity: 0.72;
+}
+
+.app-test-step.active {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.app-test-summary-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .mock-section {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1398,6 +1422,10 @@ textarea {
 .result strong {
   font-size: 13px;
   letter-spacing: -0.01em;
+}
+
+.app-test-summary-grid .result div {
+  word-break: break-word;
 }
 
 .json {

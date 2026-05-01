@@ -232,6 +232,15 @@ function authActorFromState(state) {
   };
 }
 
+function canAccessMockSource(source, actor) {
+  const ownerUsername = String(source?.meta?.ownerUsername || "").trim().toLowerCase();
+  const username = String(actor?.username || "").trim().toLowerCase();
+  const role = String(actor?.role || "user").trim().toLowerCase();
+  if (!ownerUsername) return true;
+  if (role === "admin") return true;
+  return Boolean(username) && username === ownerUsername;
+}
+
 async function requireShortLinkPermission(req, res, id, mode = "view") {
   const state = await getAuthState(req);
   if (state.enabled && !state.authenticated) {
@@ -1353,10 +1362,19 @@ function mockSourcePublicUrls(req, id) {
 async function handleCreateMockSource(req, res) {
   try {
     const body = await readJsonBody(req);
+    const state = await getAuthState(req);
     const created = createMockSource(body);
     if (!created.ok) {
       sendJson(res, created.status || 400, created);
       return;
+    }
+    if (state.enabled && state.user?.username) {
+      const updated = updateMockSource(created.source.id, {
+        ownerUsername: state.user.username,
+        mode: body?.mode,
+        label: body?.label,
+      });
+      if (updated.ok) created.source = updated.source;
     }
     sendJson(res, 201, {
       ok: true,
@@ -1369,10 +1387,15 @@ async function handleCreateMockSource(req, res) {
   }
 }
 
-function handleGetMockSource(req, res, id) {
+async function handleGetMockSource(req, res, id) {
   const found = getMockSource(id);
   if (!found.ok) {
     sendJson(res, found.status || 404, found);
+    return;
+  }
+  const state = await getAuthState(req);
+  if (!canAccessMockSource(found.source, authActorFromState(state))) {
+    sendJson(res, 403, { ok: false, error: "forbidden" });
     return;
   }
   sendJson(res, 200, {
@@ -1381,6 +1404,7 @@ function handleGetMockSource(req, res, id) {
       id: found.source.id,
       createdAt: found.source.createdAt,
       updatedAt: found.source.updatedAt,
+      meta: found.source.meta || {},
       config: found.source.config,
       logsCount: Array.isArray(found.source.logs) ? found.source.logs.length : 0,
     },
@@ -1391,6 +1415,16 @@ function handleGetMockSource(req, res, id) {
 
 async function handleUpdateMockSource(req, res, id) {
   try {
+    const state = await getAuthState(req);
+    const found = getMockSource(id);
+    if (!found.ok) {
+      sendJson(res, found.status || 404, found);
+      return;
+    }
+    if (!canAccessMockSource(found.source, authActorFromState(state))) {
+      sendJson(res, 403, { ok: false, error: "forbidden" });
+      return;
+    }
     const body = await readJsonBody(req);
     const updated = updateMockSource(id, body);
     if (!updated.ok) {
@@ -1408,10 +1442,15 @@ async function handleUpdateMockSource(req, res, id) {
   }
 }
 
-function handleGetMockLogs(req, res, id) {
+async function handleGetMockLogs(req, res, id) {
   const found = getMockSource(id);
   if (!found.ok) {
     sendJson(res, found.status || 404, found);
+    return;
+  }
+  const state = await getAuthState(req);
+  if (!canAccessMockSource(found.source, authActorFromState(state))) {
+    sendJson(res, 403, { ok: false, error: "forbidden" });
     return;
   }
   sendJson(res, 200, {
@@ -1421,7 +1460,17 @@ function handleGetMockLogs(req, res, id) {
   });
 }
 
-function handleClearMockLogs(req, res, id) {
+async function handleClearMockLogs(req, res, id) {
+  const state = await getAuthState(req);
+  const found = getMockSource(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  if (!canAccessMockSource(found.source, authActorFromState(state))) {
+    sendJson(res, 403, { ok: false, error: "forbidden" });
+    return;
+  }
   const cleared = clearMockLogs(id);
   if (!cleared.ok) {
     sendJson(res, cleared.status || 404, cleared);
@@ -1474,14 +1523,16 @@ async function handleMockSourceRequest(req, res, id, reqUrl) {
   res.end(String(cfg.body ?? ""));
 }
 
-function handleProfileEditorList(res) {
-  sendJson(res, 200, { ok: true, catalog: listEditorCatalog() });
+async function handleProfileEditorList(req, res) {
+  const state = await getAuthState(req);
+  sendJson(res, 200, { ok: true, catalog: await listEditorCatalog(authActorFromState(state)) });
 }
 
-function handleProfileEditorRead(reqUrl, res) {
+async function handleProfileEditorRead(req, reqUrl, res) {
+  const state = await getAuthState(req);
   const kind = reqUrl.searchParams.get("kind") || "";
   const name = reqUrl.searchParams.get("name") || "";
-  const out = readProfileForEdit(kind, name);
+  const out = await readProfileForEdit(kind, name, authActorFromState(state));
   if (!out.ok) {
     sendJson(res, out.status || 400, out);
     return;
@@ -1491,27 +1542,29 @@ function handleProfileEditorRead(reqUrl, res) {
 
 async function handleProfileEditorSave(req, res) {
   try {
+    const state = await getAuthState(req);
     const body = await readJsonBody(req, 2 * 1024 * 1024);
-    const out = saveProfileForEdit(body.kind, body.name, body.content);
+    const out = await saveProfileForEdit(body.kind, body.name, body.content, authActorFromState(state));
     if (!out.ok) {
       sendJson(res, out.status || 400, out);
       return;
     }
-    sendJson(res, 200, { ...out, catalog: listEditorCatalog() });
+    sendJson(res, 200, { ...out, catalog: await listEditorCatalog(authActorFromState(state)) });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
   }
 }
 
-function handleProfileEditorDelete(reqUrl, res) {
+async function handleProfileEditorDelete(req, reqUrl, res) {
+  const state = await getAuthState(req);
   const kind = reqUrl.searchParams.get("kind") || "";
   const name = reqUrl.searchParams.get("name") || "";
-  const out = deleteProfileForEdit(kind, name);
+  const out = await deleteProfileForEdit(kind, name, authActorFromState(state));
   if (!out.ok) {
     sendJson(res, out.status || 400, out);
     return;
   }
-  sendJson(res, 200, { ...out, catalog: listEditorCatalog() });
+  sendJson(res, 200, { ...out, catalog: await listEditorCatalog(authActorFromState(state)) });
 }
 
 async function handleAuthMe(req, res) {
@@ -1836,7 +1889,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && routePath === "/api/profile-editor/list") {
     if (!(await requireApiAuth(req, res))) return;
-    handleProfileEditorList(res);
+    await handleProfileEditorList(req, res);
     return;
   }
   if (req.method === "GET" && publicShortMetaApiMatch) {
@@ -1878,7 +1931,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && routePath === "/api/profile-editor/file") {
     if (!(await requireApiAuth(req, res))) return;
-    handleProfileEditorRead(url, res);
+    await handleProfileEditorRead(req, url, res);
     return;
   }
   if (req.method === "PUT" && routePath === "/api/profile-editor/file") {
@@ -1888,7 +1941,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "DELETE" && routePath === "/api/profile-editor/file") {
     if (!(await requireApiAuth(req, res))) return;
-    handleProfileEditorDelete(url, res);
+    await handleProfileEditorDelete(req, url, res);
     return;
   }
   if (req.method === "POST" && routePath === "/api/sub-test") {
@@ -1993,7 +2046,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && mockApiMatch) {
     if (!(await requireApiAuth(req, res))) return;
-    handleGetMockSource(req, res, mockApiMatch[1]);
+    await handleGetMockSource(req, res, mockApiMatch[1]);
     return;
   }
   if (req.method === "PUT" && mockApiMatch) {
@@ -2003,12 +2056,12 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && mockLogsMatch) {
     if (!(await requireApiAuth(req, res))) return;
-    handleGetMockLogs(req, res, mockLogsMatch[1]);
+    await handleGetMockLogs(req, res, mockLogsMatch[1]);
     return;
   }
   if (req.method === "POST" && mockLogsMatch) {
     if (!(await requireApiAuth(req, res))) return;
-    handleClearMockLogs(req, res, mockLogsMatch[1]);
+    await handleClearMockLogs(req, res, mockLogsMatch[1]);
     return;
   }
   if (mockResolveMatch) {
