@@ -13,6 +13,10 @@ async function importStoreModule() {
   return import(`./sqlite-store.js?case=${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
 
+async function importShortLinksModule() {
+  return import(`./short-links.js?case=${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
 test("short-link permissions deny anonymous and unrelated users by default", async (t) => {
   const ownerUsername = randomToken("owner");
   const strangerUsername = randomToken("stranger");
@@ -56,4 +60,35 @@ test("short-link permissions deny anonymous and unrelated users by default", asy
   assert.equal(owner?.canView, true);
   assert.equal(owner?.canEdit, true);
   assert.equal(owner?.accessLevel, "edit");
+});
+
+test("public short-link lookup allows anonymous direct access", async (t) => {
+  const ownerUsername = randomToken("owner");
+  const shortLinkId = randomToken("link");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-public-link-"));
+  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  t.after(() => {
+    delete process.env.SUB_MIRROR_DATA_DIR;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const { createShortLinkRow, createUser } = await importStoreModule();
+  const { getPublicShortLink } = await importShortLinksModule();
+
+  await createUser({ username: ownerUsername, password: "secret123", role: "user" });
+  await createShortLinkRow(shortLinkId, {
+    title: "Public share",
+    ownerUsername,
+    params: {
+      endpoint: "sub",
+      output: "raw",
+      sub_url: "https://example.com/sub",
+    },
+  });
+
+  const found = await getPublicShortLink(shortLinkId);
+  assert.equal(found?.ok, true);
+  assert.equal(found?.link?.id, shortLinkId);
+  assert.equal(found?.link?.params?.endpoint, "sub");
+  assert.equal(found?.link?.params?.sub_url, "https://example.com/sub");
 });

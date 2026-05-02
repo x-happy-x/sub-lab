@@ -17,6 +17,7 @@ import {
   sanitizeParams,
   createShortLink,
   getShortLink,
+  getPublicShortLink,
   updateShortLink,
   buildQueryFromParams,
 } from "./short-links.js";
@@ -1178,7 +1179,7 @@ async function handleDeleteShortLinkUser(req, res, id, hwidToken) {
 }
 
 async function handlePublicShortLink(req, res, id) {
-  const found = await getShortLink(id);
+  const found = await getPublicShortLink(id);
   if (!found.ok) {
     sendJson(res, found.status || 404, found);
     return;
@@ -1191,7 +1192,7 @@ async function handlePublicShortLink(req, res, id) {
 }
 
 async function handlePublicShortLinkMeta(req, res, id) {
-  const found = await getShortLink(id);
+  const found = await getPublicShortLink(id);
   if (!found.ok) {
     sendJson(res, found.status || 404, found);
     return;
@@ -1302,7 +1303,7 @@ function resolveShortLinkTypeOverride(reqUrl) {
 }
 
 async function handleShortLinkResolve(req, res, id) {
-  const found = await getShortLink(id);
+  const found = await getPublicShortLink(id);
   if (!found.ok) {
     res.writeHead(found.status || 404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(found.error || "short link not found");

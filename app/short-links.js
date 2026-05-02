@@ -70,6 +70,18 @@ async function getShortLink(id, actor = null) {
   };
 }
 
+async function getPublicShortLink(id) {
+  const token = String(id || "").trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) {
+    return { ok: false, status: 400, error: "invalid short link id" };
+  }
+  const link = await getShortLinkRow(token);
+  if (!link) {
+    return { ok: false, status: 404, error: "short link not found" };
+  }
+  return { ok: true, link };
+}
+
 async function updateShortLink(id, params, actor = null) {
   const existing = await getShortLink(id, actor);
   if (!existing.ok) return existing;
@@ -111,6 +123,7 @@ export {
   sanitizeParams,
   createShortLink,
   getShortLink,
+  getPublicShortLink,
   updateShortLink,
   buildQueryFromParams,
 };
