@@ -153,16 +153,17 @@ test("produceOutput supports raw base64 and json outputs", async () => {
 });
 
 test("produceOutput wraps clash provider output into full config", async () => {
-  const yamlInput = "proxies:\n  - name: test\n    type: ss\n    server: 1.1.1.1\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n";
+  const yamlInput = "proxies:\n  - name: \"[FREE] ТОЛЬКО TG БОТ + САЙТ\"\n    type: ss\n    server: 1.1.1.1\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n";
   const clashResult = await produceOutput(yamlInput, "clash");
 
   assert.equal(clashResult.ok, true);
   assert.match(clashResult.body, /^mixed-port:\s*7890$/m);
   assert.match(clashResult.body, /^proxy-groups:\s*$/m);
   assert.match(clashResult.body, /^rules:\s*$/m);
-  assert.match(clashResult.body, /name:\s*AUTO/);
-  assert.match(clashResult.body, /name:\s*PROXY/);
-  assert.match(clashResult.body, /MATCH,PROXY/);
+  assert.match(clashResult.body, /^\s+- name:\s*AUTO$/m);
+  assert.match(clashResult.body, /^\s+- name:\s*PROXY$/m);
+  assert.match(clashResult.body, /^\s+- "MATCH,PROXY"$/m);
+  assert.match(clashResult.body, /^\s+- "\[FREE\] ТОЛЬКО TG БОТ \+ САЙТ"$/m);
 });
 
 test("produceOutput does not double-wrap full clash config", async () => {

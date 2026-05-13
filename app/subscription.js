@@ -942,22 +942,35 @@ function hasAnySubscriptions(text) {
     .filter((line) => line && prefixes.some((prefix) => line.startsWith(prefix))).length > 0;
 }
 
+function formatYamlScalar(value) {
+  if (typeof value === "string") {
+    const text = String(value);
+    if (/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(text) && !/^(?:true|false|null|yes|no|on|off)$/i.test(text)) {
+      return text;
+    }
+    return JSON.stringify(text);
+  }
+  return String(value);
+}
+
 function buildYaml(obj, indent = 0) {
   const pad = "  ".repeat(indent);
   if (Array.isArray(obj)) {
     return obj
       .map((item) => {
         if (typeof item === "object" && item !== null) {
-          const head = `${pad}-`;
           const body = buildYaml(item, indent + 1);
-          return body ? `${head}\n${body}` : head;
+          if (!body) return `${pad}-`;
+          const lines = body.split("\n");
+          const first = String(lines.shift() || "").trimStart();
+          return [`${pad}- ${first}`, ...lines].join("\n");
         }
-        return `${pad}- ${String(item)}`;
+        return `${pad}- ${formatYamlScalar(item)}`;
       })
       .join("\n");
   }
   if (typeof obj !== "object" || obj === null) {
-    return `${pad}${String(obj)}`;
+    return `${pad}${formatYamlScalar(obj)}`;
   }
   return Object.entries(obj)
     .map(([key, value]) => {
@@ -968,7 +981,7 @@ function buildYaml(obj, indent = 0) {
         const body = buildYaml(value, indent + 1);
         return body ? `${pad}${key}:\n${body}` : `${pad}${key}: {}`;
       }
-      return `${pad}${key}: ${String(value)}`;
+      return `${pad}${key}: ${formatYamlScalar(value)}`;
     })
     .join("\n");
 }
@@ -1062,7 +1075,7 @@ function vlessToProxy(line) {
   const network = params.get("type") || "tcp";
   const security = params.get("security") || "none";
   const proxy = {
-    name: JSON.stringify(name),
+    name,
     type: "vless",
     server: url.hostname,
     port: Number(url.port || 443),
