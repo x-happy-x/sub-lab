@@ -1125,7 +1125,7 @@ function convertVlessListToClash(text) {
   return yaml;
 }
 
-function wrapClashProviderForFlClash(yamlText) {
+function wrapClashProviderAsFullConfig(yamlText) {
   const text = String(yamlText || "").trim();
   if (!shouldWrapClashProviderForFlClash(text)) return text;
 
@@ -2513,7 +2513,6 @@ async function produceOutput(rawText, output, options = {}) {
 
   let out = rawText;
   let conversion = "none";
-  const appToken = sanitizeProfileToken(options.app);
 
   if (!looksLikeClashProviderYaml(rawText)) {
     let convertible = extractConvertibleSource(rawText);
@@ -2542,12 +2541,10 @@ async function produceOutput(rawText, output, options = {}) {
   if (!hasAnySubscriptions(out)) {
     return { ok: false, error: "no subscriptions" };
   }
-  if (appToken === "flclashx") {
-    const wrapped = wrapClashProviderForFlClash(out);
-    if (wrapped !== out) {
-      out = wrapped;
-      conversion = conversion === "none" ? "flclashx-wrap" : `${conversion}+flclashx-wrap`;
-    }
+  const wrapped = wrapClashProviderAsFullConfig(out);
+  if (wrapped !== out) {
+    out = wrapped;
+    conversion = conversion === "none" ? "full-clash-config" : `${conversion}+full-clash-config`;
   }
   return { ok: true, body: out, contentType: "text/yaml; charset=utf-8", conversion };
 }

@@ -152,9 +152,9 @@ test("produceOutput supports raw base64 and json outputs", async () => {
   assert.equal(parsedJson[0].routing?.rules?.[1]?.outboundTag, "node-0001");
 });
 
-test("produceOutput wraps clash output for flclashx into full config", async () => {
+test("produceOutput wraps clash provider output into full config", async () => {
   const yamlInput = "proxies:\n  - name: test\n    type: ss\n    server: 1.1.1.1\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n";
-  const clashResult = await produceOutput(yamlInput, "clash", { app: "flclashx" });
+  const clashResult = await produceOutput(yamlInput, "clash");
 
   assert.equal(clashResult.ok, true);
   assert.match(clashResult.body, /^mixed-port:\s*7890$/m);
@@ -165,7 +165,7 @@ test("produceOutput wraps clash output for flclashx into full config", async () 
   assert.match(clashResult.body, /MATCH,PROXY/);
 });
 
-test("produceOutput does not double-wrap full clash config for flclashx", async () => {
+test("produceOutput does not double-wrap full clash config", async () => {
   const yamlInput = [
     "mixed-port: 7890",
     "allow-lan: true",
@@ -185,7 +185,7 @@ test("produceOutput does not double-wrap full clash config for flclashx", async 
     "rules:",
     "  - MATCH,PROXY",
   ].join("\n");
-  const clashResult = await produceOutput(yamlInput, "clash", { app: "flclashx" });
+  const clashResult = await produceOutput(yamlInput, "clash");
 
   assert.equal(clashResult.ok, true);
   assert.equal(clashResult.body, yamlInput);
