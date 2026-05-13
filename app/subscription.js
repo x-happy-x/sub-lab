@@ -1068,6 +1068,80 @@ function extractRawUrisFromJsonConfig(parsed) {
   return lines.length > 0 ? lines.join("\n") : "";
 }
 
+function collectJsonVlessProxyGroups(parsed) {
+  const configs = Array.isArray(parsed) ? parsed : [parsed];
+  const proxies = [];
+  const groups = [];
+
+  for (const [configIndex, config] of configs.entries()) {
+    if (!config || typeof config !== "object") continue;
+    const outbounds = Array.isArray(config.outbounds) ? config.outbounds : [];
+    const proxyOutbounds = outbounds.filter((outbound) => String(outbound?.protocol || "").toLowerCase() === "vless");
+    const totalOutbounds = proxyOutbounds.length;
+    const groupName = sanitizeNodeName(config.remarks, `group-${configIndex + 1}`);
+    const groupProxyNames = [];
+
+    for (const [outboundIndex, outbound] of proxyOutbounds.entries()) {
+      const vnext = outbound?.settings?.vnext?.[0];
+      const user = vnext?.users?.[0];
+      const address = String(vnext?.address || "").trim();
+      const uuid = String(user?.id || "").trim();
+      if (!address || !uuid) continue;
+
+      const port = Number(vnext?.port || 443);
+      const stream = outbound?.streamSettings || {};
+      const security = String(stream.security || "none").trim() || "none";
+      const network = String(stream.network || "tcp").trim() || "tcp";
+      const params = new URLSearchParams();
+      params.set("type", network);
+      params.set("security", security);
+
+      appendSearchParamIfPresent(params, "flow", user?.flow);
+      appendSearchParamIfPresent(params, "encryption", user?.encryption);
+
+      if (security === "reality") {
+        const reality = stream.realitySettings || {};
+        appendSearchParamIfPresent(params, "sni", reality.serverName);
+        appendSearchParamIfPresent(params, "fp", reality.fingerprint);
+        appendSearchParamIfPresent(params, "pbk", reality.publicKey);
+        appendSearchParamIfPresent(params, "sid", reality.shortId);
+      } else if (security === "tls" || security === "xtls") {
+        const tls = stream.tlsSettings || {};
+        appendSearchParamIfPresent(params, "sni", tls.serverName);
+        appendSearchParamIfPresent(params, "alpn", Array.isArray(tls.alpn) ? tls.alpn.join(",") : tls.alpn);
+      }
+
+      if (network === "ws") {
+        const ws = stream.wsSettings || {};
+        appendSearchParamIfPresent(params, "path", ws.path);
+        appendSearchParamIfPresent(params, "host", ws.headers?.Host || ws.headers?.host);
+      } else if (network === "grpc") {
+        const grpc = stream.grpcSettings || {};
+        appendSearchParamIfPresent(params, "serviceName", grpc.serviceName);
+        appendSearchParamIfPresent(params, "authority", grpc.authority);
+        if (grpc.mode === true || grpc.mode === "gun") params.set("mode", "gun");
+      } else if (network === "tcp" && stream.tcpSettings?.header?.type) {
+        appendSearchParamIfPresent(params, "headerType", stream.tcpSettings.header.type);
+      }
+
+      const name = buildNodeName(groupName, outbound.tag, totalOutbounds, outboundIndex);
+      const proxy = vlessToProxy(`vless://${encodeURIComponent(uuid)}@${address}:${port}?${params.toString()}#${encodeURIComponent(name)}`);
+      proxies.push(proxy);
+      groupProxyNames.push(proxy.name);
+    }
+
+    if (groupProxyNames.length > 0) {
+      groups.push({
+        groupName,
+        autoName: `AUTO · ${groupName}`,
+        proxies: groupProxyNames,
+      });
+    }
+  }
+
+  return { proxies, groups };
+}
+
 function vlessToProxy(line) {
   const url = new URL(line);
   const params = url.searchParams;
@@ -1130,12 +1204,116 @@ function vlessToProxy(line) {
   return proxy;
 }
 
+function renderFullClashConfig(proxies, groups = [], proxiesYamlText = "") {
+  const proxyNames = proxies
+    .map((proxy) => sanitizeNodeName(proxy?.name, "proxy"))
+    .filter(Boolean);
+  if (proxyNames.length === 0) return "";
+
+  const effectiveGroups = Array.isArray(groups) && groups.length > 0
+    ? groups.filter((group) => group?.autoName && Array.isArray(group.proxies) && group.proxies.length > 0)
+    : buildAutoProxyGroups(proxyNames);
+  const proxyGroups = [];
+  for (const group of effectiveGroups) {
+    proxyGroups.push({
+      name: group.autoName,
+      type: "url-test",
+      url: "http://www.gstatic.com/generate_204",
+      interval: 300,
+      tolerance: 50,
+      proxies: group.proxies,
+    });
+  }
+  const autoTargets = effectiveGroups.length > 0 ? effectiveGroups.map((group) => group.autoName) : proxyNames;
+  proxyGroups.push(
+    {
+      name: "AUTO",
+      type: "url-test",
+      url: "http://www.gstatic.com/generate_204",
+      interval: 300,
+      tolerance: 50,
+      proxies: autoTargets,
+    },
+    {
+      name: "PROXY",
+      type: "select",
+      proxies: ["AUTO", "DIRECT", ...autoTargets, ...proxyNames],
+    },
+  );
+  const rules = ["MATCH,PROXY"];
+
+  return [
+    "mixed-port: 7890",
+    "allow-lan: false",
+    "mode: rule",
+    "log-level: info",
+    "unified-delay: true",
+    String(proxiesYamlText || "").trim() || `proxies:\n${buildYaml(proxies, 1)}`,
+    `proxy-groups:\n${buildYaml(proxyGroups, 1)}`,
+    `rules:\n${buildYaml(rules, 1)}`,
+  ].join("\n");
+}
+
+function convertJsonConfigToClash(rawText) {
+  const trimmed = String(rawText || "").trim();
+  if (!((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    const { proxies, groups } = collectJsonVlessProxyGroups(parsed);
+    if (proxies.length === 0) return null;
+    return renderFullClashConfig(proxies, groups);
+  } catch {
+    return null;
+  }
+}
+
 function convertVlessListToClash(text) {
   const lines = extractVlessLines(text);
   if (lines.length === 0) return null;
   const proxies = lines.map(vlessToProxy);
   const yaml = `proxies:\n${buildYaml(proxies, 1)}`;
   return yaml;
+}
+
+function normalizeAutoGroupName(proxyName) {
+  const name = sanitizeNodeName(proxyName, "");
+  if (!name) return "";
+  const withoutGrp = name
+    .replace(/\s+grp[-_ ]?\d+(?:[-_]\d+)*(?:[-_][A-Za-z0-9]+)?\s*$/i, "")
+    .trim();
+  if (withoutGrp && withoutGrp !== name) return withoutGrp;
+
+  const withoutNode = name
+    .replace(/\s+(?:node|сервер|server)[-_ ]?\d+\s*$/i, "")
+    .trim();
+  if (withoutNode && withoutNode !== name) return withoutNode;
+
+  const withoutTrailingIndex = name
+    .replace(/\s+#?\d+\s*$/i, "")
+    .trim();
+  if (withoutTrailingIndex && withoutTrailingIndex !== name) return withoutTrailingIndex;
+
+  return name;
+}
+
+function buildAutoProxyGroups(proxyNames) {
+  const grouped = new Map();
+  for (const proxyName of proxyNames) {
+    const groupName = normalizeAutoGroupName(proxyName);
+    if (!groupName) continue;
+    if (!grouped.has(groupName)) grouped.set(groupName, []);
+    grouped.get(groupName).push(proxyName);
+  }
+
+  const groups = [...grouped.entries()]
+    .filter(([, names]) => names.length > 1)
+    .map(([groupName, names]) => ({
+      groupName,
+      autoName: `AUTO · ${groupName}`,
+      proxies: names,
+    }));
+
+  return groups.length > 1 ? groups : [];
 }
 
 function wrapClashProviderAsFullConfig(yamlText) {
@@ -1147,33 +1325,8 @@ function wrapClashProviderAsFullConfig(yamlText) {
     .filter(Boolean);
   if (proxyNames.length === 0) return text;
 
-  const proxyGroups = [
-    {
-      name: "AUTO",
-      type: "url-test",
-      url: "http://www.gstatic.com/generate_204",
-      interval: 300,
-      tolerance: 50,
-      proxies: proxyNames,
-    },
-    {
-      name: "PROXY",
-      type: "select",
-      proxies: ["AUTO", "DIRECT", ...proxyNames],
-    },
-  ];
-  const rules = ["MATCH,PROXY"];
-
-  return [
-    "mixed-port: 7890",
-    "allow-lan: false",
-    "mode: rule",
-    "log-level: info",
-    "unified-delay: true",
-    text,
-    `proxy-groups:\n${buildYaml(proxyGroups, 1)}`,
-    `rules:\n${buildYaml(rules, 1)}`,
-  ].join("\n");
+  const autoGroups = buildAutoProxyGroups(proxyNames);
+  return renderFullClashConfig(parseClashProxyList(text), autoGroups, text);
 }
 
 function parseInlineYamlMap(body) {
@@ -2528,6 +2681,11 @@ async function produceOutput(rawText, output, options = {}) {
   let conversion = "none";
 
   if (!looksLikeClashProviderYaml(rawText)) {
+    const jsonClash = convertJsonConfigToClash(rawText);
+    if (jsonClash) {
+      return { ok: true, body: jsonClash, contentType: "text/yaml; charset=utf-8", conversion: "json-clash-full-config" };
+    }
+
     let convertible = extractConvertibleSource(rawText);
     if (looksLikeUriListOrBase64(convertible)) {
       convertible = decodeBase64IfNeeded(convertible);

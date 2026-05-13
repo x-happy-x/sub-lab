@@ -166,6 +166,43 @@ test("produceOutput wraps clash provider output into full config", async () => {
   assert.match(clashResult.body, /^\s+- "\[FREE\] ТОЛЬКО TG БОТ \+ САЙТ"$/m);
 });
 
+test("produceOutput builds auto subgroups from grouped clash proxy names", async () => {
+  const yamlInput = [
+    "proxies:",
+    "  - name: \"🇫🇮 LTE #1 grp-29-1-alpha\"",
+    "    type: ss",
+    "    server: 1.1.1.1",
+    "    port: 443",
+    "    cipher: aes-128-gcm",
+    "    password: secret",
+    "  - name: \"🇫🇮 LTE #1 grp-29-2-beta\"",
+    "    type: ss",
+    "    server: 1.1.1.2",
+    "    port: 443",
+    "    cipher: aes-128-gcm",
+    "    password: secret",
+    "  - name: \"🇫🇮 LTE #2 grp-30-1-gamma\"",
+    "    type: ss",
+    "    server: 1.1.1.3",
+    "    port: 443",
+    "    cipher: aes-128-gcm",
+    "    password: secret",
+    "  - name: \"🇫🇮 LTE #2 grp-30-2-delta\"",
+    "    type: ss",
+    "    server: 1.1.1.4",
+    "    port: 443",
+    "    cipher: aes-128-gcm",
+    "    password: secret",
+  ].join("\n");
+  const clashResult = await produceOutput(yamlInput, "clash");
+
+  assert.equal(clashResult.ok, true);
+  assert.match(clashResult.body, /name:\s*"AUTO · 🇫🇮 LTE #1"/);
+  assert.match(clashResult.body, /name:\s*"AUTO · 🇫🇮 LTE #2"/);
+  assert.match(clashResult.body, /^\s+- "AUTO · 🇫🇮 LTE #1"$/m);
+  assert.match(clashResult.body, /^\s+- "AUTO · 🇫🇮 LTE #2"$/m);
+});
+
 test("produceOutput does not double-wrap full clash config", async () => {
   const yamlInput = [
     "mixed-port: 7890",
@@ -261,10 +298,49 @@ test("produceOutput converts JSON outbound bundle fixture to clash yaml", async 
 
   assert.equal(clashResult.ok, true);
   assert.equal(clashResult.contentType, "text/yaml; charset=utf-8");
+  assert.equal(clashResult.conversion, "json-clash-full-config");
   assert.equal(typeof clashResult.body, "string");
   assert.match(clashResult.body, /^proxies:\s*$/m);
   assert.match(clashResult.body, /type:\s*vless/);
   assert.match(clashResult.body, /servername:\s*tradingview\.com/);
+  assert.match(clashResult.body, /name:\s*"AUTO · Самый Быстрый"/);
+});
+
+test("produceOutput preserves JSON config groups in clash yaml", async () => {
+  const makeConfig = (remarks, tag, address, id) => ({
+    remarks,
+    outbounds: [
+      {
+        tag,
+        protocol: "vless",
+        settings: {
+          vnext: [
+            {
+              address,
+              port: 443,
+              users: [{ id, encryption: "none" }],
+            },
+          ],
+        },
+        streamSettings: {
+          network: "tcp",
+          security: "none",
+        },
+      },
+    ],
+  });
+  const jsonInput = JSON.stringify([
+    makeConfig("LTE #1", "node-01", "one.example.com", "11111111-1111-4111-8111-111111111111"),
+    makeConfig("LTE #2", "node-01", "two.example.com", "22222222-2222-4222-8222-222222222222"),
+  ]);
+  const clashResult = await produceOutput(jsonInput, "clash");
+
+  assert.equal(clashResult.ok, true);
+  assert.equal(clashResult.conversion, "json-clash-full-config");
+  assert.match(clashResult.body, /name:\s*"AUTO · LTE #1"/);
+  assert.match(clashResult.body, /name:\s*"AUTO · LTE #2"/);
+  assert.match(clashResult.body, /^\s+- "LTE #1"$/m);
+  assert.match(clashResult.body, /^\s+- "LTE #2"$/m);
 });
 
 test("home page contains form, qr and app buttons", () => {
