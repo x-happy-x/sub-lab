@@ -307,18 +307,17 @@ test("produceOutput converts JSON outbound bundle fixture to clash yaml", async 
 });
 
 test("produceOutput preserves JSON config groups in clash yaml", async () => {
-  const makeConfig = (remarks, tag, address, id) => ({
+  const makeConfig = (remarks, nodes) => ({
     remarks,
-    outbounds: [
-      {
-        tag,
+    outbounds: nodes.map((node) => ({
+        tag: node.tag,
         protocol: "vless",
         settings: {
           vnext: [
             {
-              address,
+              address: node.address,
               port: 443,
-              users: [{ id, encryption: "none" }],
+              users: [{ id: node.id, encryption: "none" }],
             },
           ],
         },
@@ -326,21 +325,56 @@ test("produceOutput preserves JSON config groups in clash yaml", async () => {
           network: "tcp",
           security: "none",
         },
-      },
-    ],
+      })),
   });
   const jsonInput = JSON.stringify([
-    makeConfig("LTE #1", "node-01", "one.example.com", "11111111-1111-4111-8111-111111111111"),
-    makeConfig("LTE #2", "node-01", "two.example.com", "22222222-2222-4222-8222-222222222222"),
+    makeConfig("LTE #1", [
+      { tag: "node-01", address: "one.example.com", id: "11111111-1111-4111-8111-111111111111" },
+      { tag: "node-02", address: "one-b.example.com", id: "11111111-1111-4111-8111-111111111112" },
+    ]),
+    makeConfig("LTE #2", [
+      { tag: "node-01", address: "two.example.com", id: "22222222-2222-4222-8222-222222222222" },
+    ]),
   ]);
   const clashResult = await produceOutput(jsonInput, "clash");
 
   assert.equal(clashResult.ok, true);
   assert.equal(clashResult.conversion, "json-clash-full-config");
   assert.match(clashResult.body, /name:\s*"AUTO · LTE #1"/);
-  assert.match(clashResult.body, /name:\s*"AUTO · LTE #2"/);
-  assert.match(clashResult.body, /^\s+- "LTE #1"$/m);
+  assert.doesNotMatch(clashResult.body, /name:\s*"AUTO · LTE #2"/);
+  assert.match(clashResult.body, /^\s+- "LTE #1 node-01"$/m);
   assert.match(clashResult.body, /^\s+- "LTE #2"$/m);
+});
+
+test("produceOutput adds configured regex clash groups", async () => {
+  const jsonInput = JSON.stringify({
+    remarks: "Mixed",
+    outbounds: [
+      {
+        tag: "ru-01",
+        protocol: "vless",
+        settings: { vnext: [{ address: "ru1.example.com", port: 443, users: [{ id: "11111111-1111-4111-8111-111111111111", encryption: "none" }] }] },
+        streamSettings: { network: "tcp", security: "none" },
+      },
+      {
+        tag: "ru-02",
+        protocol: "vless",
+        settings: { vnext: [{ address: "ru2.example.com", port: 443, users: [{ id: "11111111-1111-4111-8111-111111111112", encryption: "none" }] }] },
+        streamSettings: { network: "tcp", security: "none" },
+      },
+      {
+        tag: "fi-01",
+        protocol: "vless",
+        settings: { vnext: [{ address: "fi.example.com", port: 443, users: [{ id: "22222222-2222-4222-8222-222222222222", encryption: "none" }] }] },
+        streamSettings: { network: "tcp", security: "none" },
+      },
+    ],
+  });
+  const clashGroups = JSON.stringify([{ name: "RU manual", type: "regex", regex: "ru-" }]);
+  const clashResult = await produceOutput(jsonInput, "clash", { clashGroups });
+
+  assert.equal(clashResult.ok, true);
+  assert.match(clashResult.body, /name:\s*"AUTO · RU manual"/);
 });
 
 test("home page contains form, qr and app buttons", () => {

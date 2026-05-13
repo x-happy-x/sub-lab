@@ -11,6 +11,7 @@ export type SubscriptionPayload = {
   profile?: string;
   profiles?: string;
   hwid?: string;
+  clash_groups?: string;
 };
 
 export type FavoriteItem = {

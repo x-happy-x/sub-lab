@@ -64,7 +64,7 @@ import { HeroHeader } from "./components/HeroHeader";
 import { UserMenu } from "./components/UserMenu";
 import { SharePanel } from "./components/SharePanel";
 import { OverridesModal } from "./components/OverridesModal";
-import { Button, IconButton, NotificationToasts, TextInput, Textarea, Tooltip, type NotificationItem, type NotificationLevel } from "@x-happy-x/ui-kit";
+import { Badge, Button, IconButton, NotificationToasts, TextInput, Textarea, Tooltip, type NotificationItem, type NotificationLevel } from "@x-happy-x/ui-kit";
 import subLabIcon from "./assets/sub-lab-icon.png";
 
 type TipButtonProps = ComponentProps<typeof Button> & {
@@ -122,6 +122,7 @@ function defaultPayload(): SubscriptionPayload {
     profile: "",
     profiles: "",
     hwid: "",
+    clash_groups: "",
   };
 }
 
@@ -140,6 +141,55 @@ function countSourceServers(value: string): number {
     .filter((line) => /^(vless|vmess|ss|ssr|trojan):\/\//.test(line)).length;
 }
 
+type ClashGroupDraft = {
+  type?: string;
+  preset?: string;
+  name?: string;
+  countries?: string[];
+  regex?: string;
+};
+
+const CLASH_GROUP_PRESETS = [
+  { preset: "rf", name: "РФ" },
+  { preset: "europe", name: "ЕВРОПА" },
+  { preset: "cis", name: "СНГ" },
+  { type: "not_rf", name: "ВСЁ КРОМЕ РФ" },
+] as const;
+
+function parseClashGroups(value: string | undefined): ClashGroupDraft[] {
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === "object") as ClashGroupDraft[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function stringifyClashGroups(groups: ClashGroupDraft[]): string {
+  const clean = groups
+    .map((group) => ({
+      type: String(group.type || "").trim() || undefined,
+      preset: String(group.preset || "").trim() || undefined,
+      name: String(group.name || "").trim() || undefined,
+      countries: Array.isArray(group.countries) ? group.countries.map((item) => String(item || "").trim()).filter(Boolean) : undefined,
+      regex: String(group.regex || "").trim() || undefined,
+    }))
+    .filter((group) => group.preset || group.type);
+  return clean.length > 0 ? JSON.stringify(clean) : "";
+}
+
+function hasClashGroup(groups: ClashGroupDraft[], entry: typeof CLASH_GROUP_PRESETS[number]): boolean {
+  if ("preset" in entry) return groups.some((group) => group.preset === entry.preset);
+  return groups.some((group) => group.type === entry.type);
+}
+
+function toggleClashGroup(groups: ClashGroupDraft[], entry: typeof CLASH_GROUP_PRESETS[number]): ClashGroupDraft[] {
+  if (hasClashGroup(groups, entry)) {
+    return groups.filter((group) => ("preset" in entry ? group.preset !== entry.preset : group.type !== entry.type));
+  }
+  return [...groups, { ...entry }];
+}
+
 function isEncryptedHappLink(value: string): boolean {
   return /^happ:\/\/crypt\d*\//i.test(String(value || "").trim());
 }
@@ -149,6 +199,7 @@ function labelsFromPayload(p: SubscriptionPayload): string[] {
   if (p.app) labels.push(p.app);
   if (p.device) labels.push(p.device);
   if (p.profile) labels.push(`profile:${p.profile}`);
+  if (p.clash_groups) labels.push("groups");
   return labels;
 }
 
@@ -174,6 +225,7 @@ function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPa
         profile: u.searchParams.get("profile") || "",
         profiles: u.searchParams.get("profiles") || "",
         hwid: u.searchParams.get("hwid") || "",
+        clash_groups: u.searchParams.get("clash_groups") || "",
       },
     };
   } catch {
@@ -184,7 +236,7 @@ function parseUrlToPayload(raw: string): { ok: boolean; payload?: SubscriptionPa
 function buildFullUrlWithOrigin(payload: SubscriptionPayload, origin: string): string {
   const endpoint = payload.endpoint === "sub" ? "sub" : "last";
   const params = new URLSearchParams();
-  const keys: Array<keyof SubscriptionPayload> = ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"];
+  const keys: Array<keyof SubscriptionPayload> = ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups"];
   for (const key of keys) {
     const v = payload[key];
     if (v) params.set(key, String(v));
@@ -272,6 +324,7 @@ function normalizeFavoriteBackupItem(raw: unknown, index: number): FavoriteItem 
       profile: String(payloadRaw.profile || ""),
       profiles: String(payloadRaw.profiles || ""),
       hwid: String(payloadRaw.hwid || ""),
+      clash_groups: String(payloadRaw.clash_groups || ""),
     },
     labels: Array.isArray(item.labels) ? item.labels.map((value) => String(value || "")).filter(Boolean) : [],
     shortId: String(item.shortId || "").trim() || undefined,
@@ -480,6 +533,9 @@ export default function App() {
   const [name, setName] = useState("");
   const [shortIdDraft, setShortIdDraft] = useState("");
   const [hiddenDraft, setHiddenDraft] = useState(false);
+  const [clashGroupName, setClashGroupName] = useState("");
+  const [clashGroupRegex, setClashGroupRegex] = useState("");
+  const [clashGroupCountries, setClashGroupCountries] = useState("");
   const [editingIndex, setEditingIndex] = useState<number>(-1);
   const [importUrl, setImportUrl] = useState("");
   const [showImport, setShowImport] = useState(false);
@@ -743,6 +799,40 @@ export default function App() {
     void persistFavorites(list).catch(() => {});
   };
 
+  const currentClashGroups = parseClashGroups(payload.clash_groups);
+
+  const updateClashGroups = (groups: ClashGroupDraft[]) => {
+    setPayload((prev) => ({
+      ...prev,
+      clash_groups: stringifyClashGroups(groups),
+    }));
+  };
+
+  const addRegexClashGroup = () => {
+    const regex = clashGroupRegex.trim();
+    if (!regex) return;
+    updateClashGroups([
+      ...currentClashGroups,
+      { type: "regex", name: clashGroupName.trim() || regex, regex },
+    ]);
+    setClashGroupName("");
+    setClashGroupRegex("");
+  };
+
+  const addCountryClashGroup = () => {
+    const countries = clashGroupCountries
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (countries.length === 0) return;
+    updateClashGroups([
+      ...currentClashGroups,
+      { type: "country", name: clashGroupName.trim() || countries.join(", "), countries },
+    ]);
+    setClashGroupName("");
+    setClashGroupCountries("");
+  };
+
   const dismissNotification = (id: string) => {
     setNotifications((prev) => prev.filter((x) => x.id !== id));
   };
@@ -790,6 +880,9 @@ export default function App() {
     setName("");
     setShortIdDraft("");
     setHiddenDraft(false);
+    setClashGroupName("");
+    setClashGroupRegex("");
+    setClashGroupCountries("");
     setEditingIndex(-1);
   };
 
@@ -2565,6 +2658,39 @@ export default function App() {
             <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${payload.output === "raw_base64" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "raw_base64" })}>raw (base64)</TipChipButton>
             <TipChipButton tip="Формат JSON" className={`chip-btn ${payload.output === "json" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "json" })}>json</TipChipButton>
           </div>
+
+          <label className="composer-label">Группы Clash</label>
+          <div className="chip-row">
+            {CLASH_GROUP_PRESETS.map((entry) => (
+              <TipChipButton
+                key={"preset" in entry ? entry.preset : entry.type}
+                tip={`Добавить группу ${entry.name}`}
+                className={`chip-btn ${hasClashGroup(currentClashGroups, entry) ? "active" : ""}`}
+                onClick={() => updateClashGroups(toggleClashGroup(currentClashGroups, entry))}
+              >
+                {entry.name}
+              </TipChipButton>
+            ))}
+          </div>
+          <div className="url-row">
+            <TextInput placeholder="Название группы" value={clashGroupName} onChange={(e) => setClashGroupName(e.target.value)} />
+            <TextInput placeholder="Регулярка, например Finland|🇫🇮" value={clashGroupRegex} onChange={(e) => setClashGroupRegex(e.target.value)} />
+            <TipButton tip="Добавить группу по регулярке" className="btn" onClick={addRegexClashGroup}>Regex</TipButton>
+          </div>
+          <div className="url-row">
+            <TextInput placeholder="Страны/токены через запятую: 🇫🇮, Финляндия, Finland" value={clashGroupCountries} onChange={(e) => setClashGroupCountries(e.target.value)} />
+            <TipButton tip="Добавить группу по списку стран" className="btn" onClick={addCountryClashGroup}>Страны</TipButton>
+          </div>
+          {currentClashGroups.length > 0 ? (
+            <div className="labels">
+              {currentClashGroups.map((group, idx) => (
+                <Badge key={`${group.name || group.preset || group.regex}-${idx}`} className="label">
+                  {group.name || group.preset || group.regex}
+                  <button type="button" className="mini-link" onClick={() => updateClashGroups(currentClashGroups.filter((_, i) => i !== idx))}> ×</button>
+                </Badge>
+              ))}
+            </div>
+          ) : <div className="composer-meta-hint">Группы создаются только если найдено больше одного сервера. Одиночные серверы остаются без отдельной подгруппы.</div>}
 
           <label className="composer-label">ОС</label>
           <div className="chip-row">

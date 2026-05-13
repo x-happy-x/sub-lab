@@ -692,14 +692,14 @@ async function handleSubscriptionTest(req, res) {
       return;
     }
 
-    const { subUrl, output, profileNames, forwardHeaders, app, device } = config;
+    const { subUrl, output, profileNames, forwardHeaders, app, device, clashGroups } = config;
     if (!subUrl) {
       sendJson(res, 400, { ok: false, error: "sub_url is required" });
       return;
     }
 
     const fetched = await fetchWithNode(subUrl, forwardHeaders);
-    const produced = await produceOutput(fetched.body, output, { app });
+    const produced = await produceOutput(fetched.body, output, { app, clashGroups });
 
     const key = cacheKey(subUrl, output, profileNames.join(","));
     const cachePath = cachePathForKey(key);
@@ -728,7 +728,7 @@ async function handleSubscriptionTest(req, res) {
 
     let cacheValidation = { ok: false, error: "cache not found" };
     if (cacheExists && cacheBody) {
-      const check = await produceOutput(cacheBody, output, { app });
+      const check = await produceOutput(cacheBody, output, { app, clashGroups });
       if (check.ok) {
         cacheValidation = {
           ok: true,

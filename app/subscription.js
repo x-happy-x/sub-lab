@@ -1130,7 +1130,7 @@ function collectJsonVlessProxyGroups(parsed) {
       groupProxyNames.push(proxy.name);
     }
 
-    if (groupProxyNames.length > 0) {
+    if (groupProxyNames.length > 1) {
       groups.push({
         groupName,
         autoName: `AUTO · ${groupName}`,
@@ -1204,7 +1204,84 @@ function vlessToProxy(line) {
   return proxy;
 }
 
-function renderFullClashConfig(proxies, groups = [], proxiesYamlText = "") {
+const CLASH_COUNTRY_GROUP_PRESETS = {
+  rf: { name: "РФ", countries: ["🇷🇺", "Россия", "Russia", "RU"] },
+  europe: {
+    name: "ЕВРОПА",
+    countries: ["🇩🇪", "Германия", "Germany", "🇫🇮", "Финляндия", "Finland", "🇸🇪", "Швеция", "Sweden", "🇪🇪", "Эстония", "Estonia", "🇵🇱", "Польша", "Poland", "🇳🇱", "Netherlands", "🇫🇷", "France", "🇬🇧", "UK", "🇱🇹", "Lithuania", "🇱🇻", "Latvia"],
+  },
+  cis: {
+    name: "СНГ",
+    countries: ["🇰🇿", "Казахстан", "Kazakhstan", "🇧🇾", "Беларус", "Belarus", "🇦🇲", "Армения", "Armenia", "🇦🇿", "Азербайджан", "Azerbaijan", "🇰🇬", "Киргиз", "Kyrgyz", "🇺🇿", "Узбекистан", "Uzbek", "🇹🇯", "Таджикистан", "Tajik", "🇲🇩", "Молд", "Moldova"],
+  },
+};
+
+function parseClashGroupsConfig(input) {
+  if (!input) return [];
+  let parsed = input;
+  if (typeof input === "string") {
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return [];
+    }
+  }
+  const source = Array.isArray(parsed) ? parsed : [];
+  return source
+    .map((item) => {
+      const type = String(item?.type || "").trim().toLowerCase();
+      const preset = String(item?.preset || "").trim().toLowerCase();
+      const name = String(item?.name || "").trim();
+      const countries = Array.isArray(item?.countries) ? item.countries.map((value) => String(value || "").trim()).filter(Boolean) : [];
+      const regex = String(item?.regex || "").trim();
+      if (preset && CLASH_COUNTRY_GROUP_PRESETS[preset]) return { type: "preset", preset, name: name || CLASH_COUNTRY_GROUP_PRESETS[preset].name };
+      if (type === "not_rf") return { type: "not_rf", name: name || "ВСЁ КРОМЕ РФ" };
+      if (type === "country" && countries.length > 0) return { type: "country", name: name || countries.join(", "), countries };
+      if (type === "regex" && regex) return { type: "regex", name: name || regex, regex };
+      return null;
+    })
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function proxyNameMatchesCountries(proxyName, countries) {
+  const name = String(proxyName || "");
+  const lower = name.toLowerCase();
+  return countries.some((country) => {
+    const token = String(country || "").trim();
+    return token && (name.includes(token) || lower.includes(token.toLowerCase()));
+  });
+}
+
+function proxyNameMatchesClashGroup(proxyName, group) {
+  if (!group) return false;
+  if (group.type === "preset") {
+    const preset = CLASH_COUNTRY_GROUP_PRESETS[group.preset];
+    return preset ? proxyNameMatchesCountries(proxyName, preset.countries) : false;
+  }
+  if (group.type === "not_rf") return !proxyNameMatchesCountries(proxyName, CLASH_COUNTRY_GROUP_PRESETS.rf.countries);
+  if (group.type === "country") return proxyNameMatchesCountries(proxyName, group.countries);
+  if (group.type === "regex") {
+    try {
+      return new RegExp(group.regex, "i").test(String(proxyName || ""));
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function buildConfiguredClashGroups(proxyNames, config) {
+  return parseClashGroupsConfig(config)
+    .map((group) => ({
+      name: group.name,
+      autoName: `AUTO · ${group.name}`,
+      proxies: proxyNames.filter((proxyName) => proxyNameMatchesClashGroup(proxyName, group)),
+    }))
+    .filter((group) => group.proxies.length > 1);
+}
+
+function renderFullClashConfig(proxies, groups = [], proxiesYamlText = "", options = {}) {
   const proxyNames = proxies
     .map((proxy) => sanitizeNodeName(proxy?.name, "proxy"))
     .filter(Boolean);
@@ -1213,8 +1290,9 @@ function renderFullClashConfig(proxies, groups = [], proxiesYamlText = "") {
   const effectiveGroups = Array.isArray(groups) && groups.length > 0
     ? groups.filter((group) => group?.autoName && Array.isArray(group.proxies) && group.proxies.length > 0)
     : buildAutoProxyGroups(proxyNames);
+  const allGroups = [...buildConfiguredClashGroups(proxyNames, options.clashGroups), ...effectiveGroups];
   const proxyGroups = [];
-  for (const group of effectiveGroups) {
+  for (const group of allGroups) {
     proxyGroups.push({
       name: group.autoName,
       type: "url-test",
@@ -1224,7 +1302,7 @@ function renderFullClashConfig(proxies, groups = [], proxiesYamlText = "") {
       proxies: group.proxies,
     });
   }
-  const autoTargets = effectiveGroups.length > 0 ? effectiveGroups.map((group) => group.autoName) : proxyNames;
+  const autoTargets = allGroups.length > 0 ? allGroups.map((group) => group.autoName) : proxyNames;
   proxyGroups.push(
     {
       name: "AUTO",
@@ -1254,14 +1332,14 @@ function renderFullClashConfig(proxies, groups = [], proxiesYamlText = "") {
   ].join("\n");
 }
 
-function convertJsonConfigToClash(rawText) {
+function convertJsonConfigToClash(rawText, options = {}) {
   const trimmed = String(rawText || "").trim();
   if (!((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) return null;
   try {
     const parsed = JSON.parse(trimmed);
     const { proxies, groups } = collectJsonVlessProxyGroups(parsed);
     if (proxies.length === 0) return null;
-    return renderFullClashConfig(proxies, groups);
+    return renderFullClashConfig(proxies, groups, "", options);
   } catch {
     return null;
   }
@@ -1316,7 +1394,7 @@ function buildAutoProxyGroups(proxyNames) {
   return groups.length > 1 ? groups : [];
 }
 
-function wrapClashProviderAsFullConfig(yamlText) {
+function wrapClashProviderAsFullConfig(yamlText, options = {}) {
   const text = String(yamlText || "").trim();
   if (!shouldWrapClashProviderForFlClash(text)) return text;
 
@@ -1326,7 +1404,7 @@ function wrapClashProviderAsFullConfig(yamlText) {
   if (proxyNames.length === 0) return text;
 
   const autoGroups = buildAutoProxyGroups(proxyNames);
-  return renderFullClashConfig(parseClashProxyList(text), autoGroups, text);
+  return renderFullClashConfig(parseClashProxyList(text), autoGroups, text, options);
 }
 
 function parseInlineYamlMap(body) {
@@ -2096,6 +2174,18 @@ function resolveOutputFromUserAgent(userAgent, fallbackOutput = OUTPUT_DEFAULT) 
   return { output, app: appKey, matched: true };
 }
 
+function normalizeClashGroupsParam(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    const groups = parseClashGroupsConfig(parsed);
+    return groups.length > 0 ? JSON.stringify(groups) : "";
+  } catch {
+    return "";
+  }
+}
+
 function pickProfileNames(reqUrl, reqHeaders, forcedProfileName = "") {
   const rawNames = [
     ...reqUrl.searchParams.getAll("profile"),
@@ -2297,6 +2387,9 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
   if (!resolvedHeaders.ok) {
     return { ok: false, status: 400, error: resolvedHeaders.error };
   }
+  const clashGroups = normalizeClashGroupsParam(
+    reqUrl.searchParams.get("clash_groups") ?? firstHeaderValue(reqHeaders["x-clash-groups"]),
+  );
 
   return {
     ok: true,
@@ -2305,6 +2398,7 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
     outputAuto,
     app,
     device,
+    clashGroups,
     profileNames,
     forwardHeaders: resolvedHeaders.headers,
   };
@@ -2508,7 +2602,7 @@ function resolveLocalSourcePath(input) {
 
 function buildRequestUrlFromParams(params) {
   const reqUrl = new URL("http://localhost/sub");
-  for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid"]) {
+  for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups"]) {
     const value = params?.[key];
     if (value === undefined || value === null || value === "") continue;
     reqUrl.searchParams.set(key, String(value));
@@ -2681,7 +2775,7 @@ async function produceOutput(rawText, output, options = {}) {
   let conversion = "none";
 
   if (!looksLikeClashProviderYaml(rawText)) {
-    const jsonClash = convertJsonConfigToClash(rawText);
+    const jsonClash = convertJsonConfigToClash(rawText, options);
     if (jsonClash) {
       return { ok: true, body: jsonClash, contentType: "text/yaml; charset=utf-8", conversion: "json-clash-full-config" };
     }
@@ -2712,7 +2806,7 @@ async function produceOutput(rawText, output, options = {}) {
   if (!hasAnySubscriptions(out)) {
     return { ok: false, error: "no subscriptions" };
   }
-  const wrapped = wrapClashProviderAsFullConfig(out);
+  const wrapped = wrapClashProviderAsFullConfig(out, options);
   if (wrapped !== out) {
     out = wrapped;
     conversion = conversion === "none" ? "full-clash-config" : `${conversion}+full-clash-config`;
@@ -2720,7 +2814,7 @@ async function produceOutput(rawText, output, options = {}) {
   return { ok: true, body: out, contentType: "text/yaml; charset=utf-8", conversion };
 }
 
-async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "", device = "", req = null) {
+async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "", device = "", req = null, clashGroups = "") {
   const fetched = await fetchWithNode(subUrl, forwardHeaders);
   await persistSuccessfulSourceSnapshot({
     req,
@@ -2733,13 +2827,13 @@ async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = 
     forwardHeaders,
     fetched,
   });
-  const produced = await produceOutput(fetched.body, output, { app });
+  const produced = await produceOutput(fetched.body, output, { app, clashGroups });
   if (!produced.ok) {
     return produced;
   }
   const upstreamHeaders = sanitizeUpstreamResponseHeaders(fetched.responseHeaders);
   ensureCacheDir();
-  const cacheKeyValue = cacheKey(subUrl, output, profileNames.join(","));
+  const cacheKeyValue = cacheKey(subUrl, output, [profileNames.join(","), clashGroups].filter(Boolean).join("|"));
   const cachePath = cachePathForKey(cacheKeyValue);
   fs.writeFileSync(`${cachePath}.tmp`, produced.body);
   fs.renameSync(`${cachePath}.tmp`, cachePath);
@@ -2773,7 +2867,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
     return;
   }
 
-  const { subUrl, profileNames, forwardHeaders, app, device } = config;
+  const { subUrl, profileNames, forwardHeaders, app, device, clashGroups } = config;
 
   if (!subUrl) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -2845,7 +2939,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       throw new Error("got HTML (anti-bot page)");
     }
 
-    const produced = await produceOutput(raw, output, { app });
+    const produced = await produceOutput(raw, output, { app, clashGroups });
     if (!produced.ok) {
       writeStatus({
         ok: false,
@@ -2870,7 +2964,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
     fs.writeFileSync(`${savedPath}.tmp`, out);
     fs.renameSync(`${savedPath}.tmp`, savedPath);
     ensureCacheDir();
-    const cacheKeyValue = cacheKey(subUrl, output, profileNames.join(","));
+    const cacheKeyValue = cacheKey(subUrl, output, [profileNames.join(","), clashGroups].filter(Boolean).join("|"));
     const cachePath = cachePathForKey(cacheKeyValue);
     fs.writeFileSync(`${cachePath}.tmp`, out);
     fs.renameSync(`${cachePath}.tmp`, cachePath);
@@ -2926,7 +3020,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       profileNames,
       forwardHeaders,
     });
-    if (await respondFromStoredSnapshot(res, fallback, output, { app })) {
+    if (await respondFromStoredSnapshot(res, fallback, output, { app, clashGroups })) {
       logRequest({
         route: "/sub",
         status: 200,
@@ -2975,7 +3069,7 @@ async function handleLast(req, res, forcedProfileName = "") {
     return;
   }
 
-  const { subUrl, profileNames, forwardHeaders, app, device } = config;
+  const { subUrl, profileNames, forwardHeaders, app, device, clashGroups } = config;
 
   if (!subUrl) {
     res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -2995,7 +3089,7 @@ async function handleLast(req, res, forcedProfileName = "") {
 
   let refreshed = null;
   try {
-    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders, app, device, req);
+    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders, app, device, req, clashGroups);
   } catch {
     refreshed = null;
   }
@@ -3035,7 +3129,7 @@ async function handleLast(req, res, forcedProfileName = "") {
     });
   }
 
-  const key = cacheKey(subUrl, output, profileNames.join(","));
+  const key = cacheKey(subUrl, output, [profileNames.join(","), clashGroups].filter(Boolean).join("|"));
   const path = cachePathForKey(key);
   try {
     let contentType = "text/yaml; charset=utf-8";
@@ -3081,7 +3175,7 @@ async function handleLast(req, res, forcedProfileName = "") {
       profileNames,
       forwardHeaders,
     });
-    if (await respondFromStoredSnapshot(res, fallback, output, { app })) {
+    if (await respondFromStoredSnapshot(res, fallback, output, { app, clashGroups })) {
       logRequest({
         route: "/last",
         status: 200,
