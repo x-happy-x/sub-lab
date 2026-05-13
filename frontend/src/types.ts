@@ -19,6 +19,7 @@ export type FavoriteItem = {
   payload: SubscriptionPayload;
   labels: string[];
   shortId?: string;
+  hidden?: boolean;
   permissions?: ShortLinkPermissions;
   ts: number;
 };

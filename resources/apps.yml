@@ -12,7 +12,7 @@ apps:
 
   - key: flclashx
     label: FlClashX
-    deeplink: "flclashx://install-config?url={url}"
+    deeplink: "flclashx://install-config?url={encoded_url}"
     platforms: [android, linux, windows, macos]
     formats: [yml]
 

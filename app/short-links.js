@@ -3,11 +3,13 @@ import {
   createShortLinkRow,
   getShortLinkRow,
   getShortLinkPermissions,
+  renameShortLinkRow,
   updateShortLinkRow,
 } from "./sqlite-store.js";
 
 const VALID_ENDPOINTS = new Set(["last", "sub"]);
 const PARAM_KEYS = ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "endpoint"];
+const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function sanitizeParams(input) {
   const out = {};
@@ -32,23 +34,38 @@ async function generateId() {
   return crypto.randomBytes(8).toString("hex");
 }
 
+function normalizeRequestedId(value) {
+  const token = String(value || "").trim();
+  if (!token) return "";
+  if (!ID_PATTERN.test(token)) return null;
+  return token.slice(0, 80);
+}
+
 async function createShortLink(params) {
   const sanitized = sanitizeParams(params?.params || params);
   if (!sanitized.sub_url) {
     return { ok: false, status: 400, error: "sub_url is required" };
   }
-  const id = await generateId();
+  const requestedId = normalizeRequestedId(params?.id ?? params?.shortId ?? params?.slug);
+  if (requestedId === null) {
+    return { ok: false, status: 400, error: "invalid short link id" };
+  }
+  const id = requestedId || await generateId();
+  if (await getShortLinkRow(id)) {
+    return { ok: false, status: 409, error: "short link id already exists" };
+  }
   const link = await createShortLinkRow(id, {
     params: sanitized,
     title: params?.title,
     ownerUsername: params?.ownerUsername,
+    hidden: Boolean(params?.hidden),
   });
   return { ok: true, link };
 }
 
 async function getShortLink(id, actor = null) {
   const token = String(id || "").trim();
-  if (!/^[A-Za-z0-9_-]+$/.test(token)) {
+  if (!ID_PATTERN.test(token)) {
     return { ok: false, status: 400, error: "invalid short link id" };
   }
   const permission = await getShortLinkPermissions(token, actor);
@@ -72,11 +89,14 @@ async function getShortLink(id, actor = null) {
 
 async function getPublicShortLink(id) {
   const token = String(id || "").trim();
-  if (!/^[A-Za-z0-9_-]+$/.test(token)) {
+  if (!ID_PATTERN.test(token)) {
     return { ok: false, status: 400, error: "invalid short link id" };
   }
   const link = await getShortLinkRow(token);
   if (!link) {
+    return { ok: false, status: 404, error: "short link not found" };
+  }
+  if (link.hidden) {
     return { ok: false, status: 404, error: "short link not found" };
   }
   return { ok: true, link };
@@ -94,9 +114,28 @@ async function updateShortLink(id, params, actor = null) {
     return { ok: false, status: 400, error: "sub_url is required" };
   }
 
-  const token = existing.link.id;
+  let token = existing.link.id;
+  const requestedId = params?.id !== undefined || params?.shortId !== undefined || params?.slug !== undefined
+    ? normalizeRequestedId(params?.id ?? params?.shortId ?? params?.slug)
+    : "";
+  if (requestedId === null) {
+    return { ok: false, status: 400, error: "invalid short link id" };
+  }
+  if (requestedId && requestedId !== token) {
+    try {
+      const renamed = await renameShortLinkRow(token, requestedId);
+      if (!renamed) return { ok: false, status: 404, error: "short link not found" };
+      token = renamed.id;
+    } catch (e) {
+      if (e?.code === "SQLITE_CONSTRAINT") {
+        return { ok: false, status: 409, error: "short link id already exists" };
+      }
+      throw e;
+    }
+  }
   let current = await updateShortLinkRow(token, sanitized, {
     title: params?.title,
+    hidden: params?.hidden,
   });
   if (!current) {
     return { ok: false, status: 404, error: "short link not found" };

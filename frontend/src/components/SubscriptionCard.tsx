@@ -61,6 +61,11 @@ export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare, onOp
             {item.permissions.accessLevel}
           </Badge>
         ) : null}
+        {item.hidden ? (
+          <Badge className="label">
+            hidden
+          </Badge>
+        ) : null}
         {item.labels.map((x) => (
           <Badge key={x} className="label">
             {x}

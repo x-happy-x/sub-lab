@@ -275,6 +275,7 @@ function normalizeFavoriteBackupItem(raw: unknown, index: number): FavoriteItem 
     },
     labels: Array.isArray(item.labels) ? item.labels.map((value) => String(value || "")).filter(Boolean) : [],
     shortId: String(item.shortId || "").trim() || undefined,
+    hidden: Boolean(item.hidden),
     ts: Number.isFinite(tsValue) && tsValue > 0 ? tsValue : Date.now() + index,
   };
 }
@@ -477,6 +478,8 @@ export default function App() {
   const [happDecryptLoading, setHappDecryptLoading] = useState(false);
   const [happDecryptStatus, setHappDecryptStatus] = useState("");
   const [name, setName] = useState("");
+  const [shortIdDraft, setShortIdDraft] = useState("");
+  const [hiddenDraft, setHiddenDraft] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number>(-1);
   const [importUrl, setImportUrl] = useState("");
   const [showImport, setShowImport] = useState(false);
@@ -785,6 +788,8 @@ export default function App() {
     setHappDecryptLoading(false);
     setHappDecryptStatus("");
     setName("");
+    setShortIdDraft("");
+    setHiddenDraft(false);
     setEditingIndex(-1);
   };
 
@@ -1016,18 +1021,23 @@ export default function App() {
       let shortId = existing?.shortId || "";
       let shortUrl = existing?.url || "";
       const nextPayload = { ...payload, sub_url: resolvedSubUrl };
+      const requestedShortId = String(shortIdDraft || "").trim();
+      const saveOptions = {
+        id: requestedShortId || undefined,
+        hidden: hiddenDraft,
+      };
 
-      if (shortId && !forceNew) await updateShortLink(shortId, nextPayload, name.trim());
-      else {
-        const created = await createShortLink(nextPayload, name.trim());
-        shortId = created.id;
-        shortUrl = created.shortUrl;
-      }
+      const saved = shortId && !forceNew
+        ? await updateShortLink(shortId, nextPayload, name.trim(), saveOptions)
+        : await createShortLink(nextPayload, name.trim(), saveOptions);
+      shortId = saved.id;
+      shortUrl = saved.shortUrl;
 
       const item: FavoriteItem = {
         title: name.trim(),
         url: shortUrl,
         shortId,
+        hidden: saved.hidden,
         payload: nextPayload,
         labels: labelsFromPayload(nextPayload),
         ts: Date.now(),
@@ -1058,6 +1068,8 @@ export default function App() {
       nextPayload = { ...defaultPayload(), ...parsed.payload };
     }
     setPayload(nextPayload);
+    setShortIdDraft(parsed.shortId || "");
+    setHiddenDraft(false);
     openModal("composer");
     await hydrateComposerSource(nextPayload);
     notify("info", "Ссылка импортирована");
@@ -1072,6 +1084,8 @@ export default function App() {
     }
     setEditingIndex(idx);
     setName(item.title);
+    setShortIdDraft(item.shortId || "");
+    setHiddenDraft(Boolean(item.hidden));
     const nextPayload = { ...defaultPayload(), ...item.payload };
     setOriginalHappUrl("");
     setHappDecryptDismissedUrl("");
@@ -2456,6 +2470,18 @@ export default function App() {
           <label className="composer-label">Название</label>
           <TextInput placeholder="Название подписки" value={name} onChange={(e) => setName(e.target.value)} />
 
+          <label className="composer-label">Короткая ссылка</label>
+          <TextInput
+            placeholder="my-sub или оставить пустым для генерации"
+            value={shortIdDraft}
+            onChange={(e) => setShortIdDraft(e.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80))}
+          />
+          <label className="share-access-row">
+            <span>Скрыть подписку по короткой ссылке</span>
+            <input type="checkbox" checked={hiddenDraft} onChange={(e) => setHiddenDraft(e.target.checked)} />
+          </label>
+          {hiddenDraft ? <div className="composer-meta-hint">Публичные `/l/{shortIdDraft || "..."}` и meta API будут отвечать 404. Владелец и админ смогут редактировать подписку в кабинете.</div> : null}
+
           <label className="composer-label">Источник</label>
           <div className="chip-row">
             <TipChipButton tip="Загрузить источник по URL" className={`chip-btn ${composerSourceMode === "url" ? "active" : ""}`} onClick={() => setComposerSourceMode("url")}>URL</TipChipButton>
@@ -2792,7 +2818,7 @@ export default function App() {
         <Modal onClose={() => setShowShare(false)} title={`Поделиться: ${shareItem.title}`} showCloseButton>
           <>
             <SharePanel
-              shortUrl={shareItem.url || buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
+              shortUrl={shareItem.hidden ? "" : (shareItem.url || buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin))}
               fullUrl={buildFullUrlWithOrigin(shareItem.payload, effectiveOrigin)}
               shareApps={shareApps}
               recommendedByOs={recommendedByOs}
@@ -2806,6 +2832,7 @@ export default function App() {
               fetchGuide={fetchAppGuide}
               onCopy={(text) => { void copyToClipboard(text); }}
             />
+            {shareItem.hidden ? <div className="status">Короткая ссылка скрыта: публичный адрес `/l/{shareItem.shortId || ""}` недоступен.</div> : null}
             {isAdminUser && shareItem.shortId ? (
               <section className="sub-card share-access-card">
                 <div className="admin-section-head">

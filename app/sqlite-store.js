@@ -44,6 +44,7 @@ function runMigrations(db) {
       params_json TEXT NOT NULL,
       title TEXT NOT NULL DEFAULT '',
       owner_username TEXT NOT NULL DEFAULT '',
+      hidden INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       hits INTEGER NOT NULL DEFAULT 0
@@ -211,6 +212,7 @@ function runMigrations(db) {
   }
   ensureColumnExists(db, "short_links", "title", "TEXT NOT NULL DEFAULT ''");
   ensureColumnExists(db, "short_links", "owner_username", "TEXT NOT NULL DEFAULT ''");
+  ensureColumnExists(db, "short_links", "hidden", "INTEGER NOT NULL DEFAULT 0");
   ensureColumnExists(db, "subscription_feeds", "hwid", "TEXT NOT NULL DEFAULT ''");
   ensureColumnExists(db, "subscription_feeds", "last_success_source_snapshot_id", "INTEGER");
 }
@@ -553,21 +555,22 @@ async function createShortLinkRow(id, input) {
   const now = new Date().toISOString();
   const title = String(input?.title || "").trim();
   const ownerUsername = normalizeUsername(input?.ownerUsername ?? input?.owner_username);
+  const hidden = input?.hidden ? 1 : 0;
   const params = input?.params && typeof input.params === "object" ? input.params : (input || {});
   const stmt = db.prepare(`
-    INSERT INTO short_links (id, params_json, title, owner_username, created_at, updated_at, hits)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO short_links (id, params_json, title, owner_username, hidden, created_at, updated_at, hits)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
   `);
-  stmt.run([id, JSON.stringify(params), title, ownerUsername, now, now]);
+  stmt.run([id, JSON.stringify(params), title, ownerUsername, hidden, now, now]);
   stmt.free();
   saveDb(db);
-  return { id, params, title, ownerUsername, createdAt: now, updatedAt: now, hits: 0 };
+  return { id, params, title, ownerUsername, hidden: Boolean(hidden), createdAt: now, updatedAt: now, hits: 0 };
 }
 
 async function getShortLinkRow(id) {
   const db = await getDb();
   const stmt = db.prepare(`
-    SELECT id, params_json, title, owner_username, created_at, updated_at, hits
+    SELECT id, params_json, title, owner_username, hidden, created_at, updated_at, hits
     FROM short_links
     WHERE id = ?
     LIMIT 1
@@ -587,6 +590,7 @@ async function getShortLinkRow(id) {
     params,
     title: String(row.title || ""),
     ownerUsername: normalizeUsername(row.owner_username),
+    hidden: Boolean(Number(row.hidden || 0)),
     createdAt: String(row.created_at || ""),
     updatedAt: String(row.updated_at || ""),
     hits: Number(row.hits || 0),
@@ -602,13 +606,14 @@ async function updateShortLinkRow(id, params, meta = {}) {
   const nextOwnerUsername = meta.ownerUsername !== undefined
     ? normalizeUsername(meta.ownerUsername)
     : existing.ownerUsername;
+  const nextHidden = meta.hidden !== undefined ? (meta.hidden ? 1 : 0) : (existing.hidden ? 1 : 0);
   const now = new Date().toISOString();
   const stmt = db.prepare(`
     UPDATE short_links
-    SET params_json = ?, title = ?, owner_username = ?, updated_at = ?
+    SET params_json = ?, title = ?, owner_username = ?, hidden = ?, updated_at = ?
     WHERE id = ?
   `);
-  stmt.run([JSON.stringify(nextParams), nextTitle, nextOwnerUsername, now, id]);
+  stmt.run([JSON.stringify(nextParams), nextTitle, nextOwnerUsername, nextHidden, now, id]);
   stmt.free();
   saveDb(db);
   return {
@@ -616,8 +621,42 @@ async function updateShortLinkRow(id, params, meta = {}) {
     params: nextParams,
     title: nextTitle,
     ownerUsername: nextOwnerUsername,
+    hidden: Boolean(nextHidden),
     updatedAt: now,
   };
+}
+
+async function renameShortLinkRow(oldId, newId) {
+  const source = String(oldId || "").trim();
+  const target = String(newId || "").trim();
+  if (!source || !target || source === target) return await getShortLinkRow(source);
+  const db = await getDb();
+  const existing = await getShortLinkRow(source);
+  if (!existing) return null;
+  const conflict = await getShortLinkRow(target);
+  if (conflict) {
+    const err = new Error("short link id already exists");
+    err.code = "SQLITE_CONSTRAINT";
+    throw err;
+  }
+  const now = nowIso();
+  db.run("BEGIN");
+  try {
+    const linkStmt = db.prepare("UPDATE short_links SET id = ?, updated_at = ? WHERE id = ?");
+    linkStmt.run([target, now, source]);
+    linkStmt.free();
+    for (const tableName of ["short_link_access", "short_link_user_policy", "short_link_users", "short_link_user_history"]) {
+      const stmt = db.prepare(`UPDATE ${tableName} SET short_link_id = ? WHERE short_link_id = ?`);
+      stmt.run([target, source]);
+      stmt.free();
+    }
+    db.run("COMMIT");
+  } catch (e) {
+    db.run("ROLLBACK");
+    throw e;
+  }
+  saveDb(db);
+  return await getShortLinkRow(target);
 }
 
 async function incrementShortLinkHits(id) {
@@ -1818,6 +1857,7 @@ export {
   listShortLinkAccess,
   replaceShortLinkAccess,
   updateShortLinkRow,
+  renameShortLinkRow,
   incrementShortLinkHits,
   createAuthSessionForUser,
   getAuthSession,

@@ -82,13 +82,20 @@ export async function logout(): Promise<void> {
   if (!resp.ok || !json.ok) throw new Error(json.error || "logout failed");
 }
 
-export async function createShortLink(payload: SubscriptionPayload, title = ""): Promise<{ id: string; shortUrl: string }> {
-  const body: Record<string, string> = {};
+export type ShortLinkSaveOptions = {
+  id?: string;
+  hidden?: boolean;
+};
+
+export async function createShortLink(payload: SubscriptionPayload, title = "", options: ShortLinkSaveOptions = {}): Promise<{ id: string; shortUrl: string; hidden: boolean }> {
+  const body: Record<string, string | boolean> = {};
   for (const key of PARAM_KEYS) {
     const v = payload[key];
     if (v) body[key] = String(v);
   }
   if (title.trim()) body.title = title.trim();
+  if (options.id?.trim()) body.id = options.id.trim();
+  if (options.hidden !== undefined) body.hidden = Boolean(options.hidden);
   const resp = await fetch("/api/short-links", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -96,16 +103,18 @@ export async function createShortLink(payload: SubscriptionPayload, title = ""):
   });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link create failed");
-  return { id: json.link.id, shortUrl: rewriteUrlToBrowserOrigin(String(json.urls.shortUrl || "")) };
+  return { id: json.link.id, shortUrl: rewriteUrlToBrowserOrigin(String(json.urls.shortUrl || "")), hidden: Boolean(json.link.hidden) };
 }
 
-export async function updateShortLink(id: string, payload: SubscriptionPayload, title = ""): Promise<void> {
-  const body: Record<string, string> = {};
+export async function updateShortLink(id: string, payload: SubscriptionPayload, title = "", options: ShortLinkSaveOptions = {}): Promise<{ id: string; shortUrl: string; hidden: boolean }> {
+  const body: Record<string, string | boolean> = {};
   for (const key of PARAM_KEYS) {
     const v = payload[key];
     if (v) body[key] = String(v);
   }
   if (title.trim()) body.title = title.trim();
+  if (options.id?.trim()) body.id = options.id.trim();
+  if (options.hidden !== undefined) body.hidden = Boolean(options.hidden);
   const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -113,6 +122,7 @@ export async function updateShortLink(id: string, payload: SubscriptionPayload, 
   });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link update failed");
+  return { id: String(json.link?.id || id), shortUrl: rewriteUrlToBrowserOrigin(String(json.urls?.shortUrl || "")), hidden: Boolean(json.link?.hidden) };
 }
 
 export async function fetchShortLink(id: string): Promise<SubscriptionPayload> {

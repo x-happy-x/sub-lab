@@ -92,3 +92,77 @@ test("public short-link lookup allows anonymous direct access", async (t) => {
   assert.equal(found?.link?.params?.endpoint, "sub");
   assert.equal(found?.link?.params?.sub_url, "https://example.com/sub");
 });
+
+test("hidden short-link lookup denies public access but keeps owner access", async (t) => {
+  const ownerUsername = randomToken("owner");
+  const shortLinkId = randomToken("link");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-hidden-link-"));
+  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  t.after(() => {
+    delete process.env.SUB_MIRROR_DATA_DIR;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const { createShortLinkRow, createUser, getShortLinkPermissions } = await importStoreModule();
+  const { getPublicShortLink } = await importShortLinksModule();
+
+  await createUser({ username: ownerUsername, password: "secret123", role: "user" });
+  await createShortLinkRow(shortLinkId, {
+    title: "Hidden share",
+    ownerUsername,
+    hidden: true,
+    params: {
+      endpoint: "sub",
+      output: "raw",
+      sub_url: "https://example.com/sub",
+    },
+  });
+
+  const publicLookup = await getPublicShortLink(shortLinkId);
+  assert.equal(publicLookup?.ok, false);
+  assert.equal(publicLookup?.status, 404);
+
+  const owner = await getShortLinkPermissions(shortLinkId, { username: ownerUsername, role: "user" });
+  assert.equal(owner?.canView, true);
+  assert.equal(owner?.link?.hidden, true);
+});
+
+test("short-link update can rename id and preserve related access", async (t) => {
+  const ownerUsername = randomToken("owner");
+  const viewerUsername = randomToken("viewer");
+  const oldId = randomToken("old");
+  const newId = randomToken("new");
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-rename-link-"));
+  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  t.after(() => {
+    delete process.env.SUB_MIRROR_DATA_DIR;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const { createShortLinkRow, createUser, getShortLinkRow, renameShortLinkRow, replaceShortLinkAccess, listShortLinkAccess } = await importStoreModule();
+
+  await createUser({ username: ownerUsername, password: "secret123", role: "user" });
+  await createUser({ username: viewerUsername, password: "secret123", role: "user" });
+  await createShortLinkRow(oldId, {
+    title: "Renamed share",
+    ownerUsername,
+    params: {
+      endpoint: "sub",
+      output: "raw",
+      sub_url: "https://example.com/sub",
+    },
+  });
+  await replaceShortLinkAccess(oldId, [{ username: viewerUsername, accessLevel: "view" }]);
+
+  const renamed = await renameShortLinkRow(oldId, newId);
+  assert.equal(renamed.id, newId);
+
+  const oldLink = await getShortLinkRow(oldId);
+  assert.equal(oldLink, null);
+
+  const newLink = await getShortLinkRow(newId);
+  assert.equal(newLink.id, newId);
+  const grants = await listShortLinkAccess(newId);
+  assert.equal(grants.length, 1);
+  assert.equal(grants[0].username, viewerUsername);
+});

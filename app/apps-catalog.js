@@ -15,7 +15,7 @@ const DEFAULT_ITEMS = [
   {
     key: "flclashx",
     label: "FlClashX",
-    deeplink: "flclashx://install-config?url={url}",
+    deeplink: "flclashx://install-config?url={encoded_url}",
     platforms: ["android"],
     formats: ["yml"],
   },

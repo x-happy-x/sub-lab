@@ -813,6 +813,8 @@ async function handleCreateShortLink(req, res) {
       params: picked,
       title: body?.title,
       ownerUsername: state.user?.username || "",
+      id: body?.id ?? body?.shortId ?? body?.slug,
+      hidden: Boolean(body?.hidden),
     });
     if (!created.ok) {
       sendJson(res, created.status || 400, created);
@@ -839,6 +841,8 @@ async function handleUpdateShortLink(req, res, id) {
     const updated = await updateShortLink(id, {
       params: sanitizeParams(picked),
       title: body?.title,
+      id: body?.id ?? body?.shortId ?? body?.slug,
+      hidden: body?.hidden === undefined ? undefined : Boolean(body.hidden),
     }, authActorFromState(state));
     if (!updated.ok) {
       sendJson(res, updated.status || 400, updated);
