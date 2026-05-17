@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
+  normalizeTags,
+} from "./short-links.js";
+import {
   normalizeOutput,
   parseServersFromText,
   renderHomePage,
@@ -15,6 +18,11 @@ import {
   produceOutput,
   fetchWithNode,
 } from "./server.js";
+
+test("normalizeTags parses router tags", () => {
+  assert.deepEqual(normalizeTags("router, home router #edge bad/tag"), ["router", "home", "edge"]);
+  assert.deepEqual(normalizeTags(["Router", "router", "office-1"]), ["router", "office-1"]);
+});
 
 test("normalizeOutput supports aliases", () => {
   assert.equal(normalizeOutput("yml"), "clash");

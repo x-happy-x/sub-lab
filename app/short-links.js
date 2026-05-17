@@ -41,6 +41,23 @@ function normalizeRequestedId(value) {
   return token.slice(0, 80);
 }
 
+function normalizeTags(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[\s,;]+/);
+  const tags = [];
+  const seen = new Set();
+  for (const item of source) {
+    const token = String(item || "").trim().replace(/^#+/, "").toLowerCase();
+    if (!token || seen.has(token)) continue;
+    if (!/^[a-z0-9._-]+$/.test(token)) continue;
+    seen.add(token);
+    tags.push(token.slice(0, 64));
+    if (tags.length >= 30) break;
+  }
+  return tags;
+}
+
 async function createShortLink(params) {
   const sanitized = sanitizeParams(params?.params || params);
   if (!sanitized.sub_url) {
@@ -59,6 +76,7 @@ async function createShortLink(params) {
     title: params?.title,
     ownerUsername: params?.ownerUsername,
     hidden: Boolean(params?.hidden),
+    tags: normalizeTags(params?.tags),
   });
   return { ok: true, link };
 }
@@ -136,6 +154,7 @@ async function updateShortLink(id, params, actor = null) {
   let current = await updateShortLinkRow(token, sanitized, {
     title: params?.title,
     hidden: params?.hidden,
+    tags: params?.tags === undefined ? undefined : normalizeTags(params.tags),
   });
   if (!current) {
     return { ok: false, status: 404, error: "short link not found" };
@@ -160,6 +179,7 @@ function buildQueryFromParams(params) {
 export {
   PARAM_KEYS,
   sanitizeParams,
+  normalizeTags,
   createShortLink,
   getShortLink,
   getPublicShortLink,

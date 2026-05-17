@@ -45,6 +45,7 @@ function runMigrations(db) {
       title TEXT NOT NULL DEFAULT '',
       owner_username TEXT NOT NULL DEFAULT '',
       hidden INTEGER NOT NULL DEFAULT 0,
+      tags_json TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       hits INTEGER NOT NULL DEFAULT 0
@@ -213,6 +214,7 @@ function runMigrations(db) {
   ensureColumnExists(db, "short_links", "title", "TEXT NOT NULL DEFAULT ''");
   ensureColumnExists(db, "short_links", "owner_username", "TEXT NOT NULL DEFAULT ''");
   ensureColumnExists(db, "short_links", "hidden", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumnExists(db, "short_links", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumnExists(db, "subscription_feeds", "hwid", "TEXT NOT NULL DEFAULT ''");
   ensureColumnExists(db, "subscription_feeds", "last_success_source_snapshot_id", "INTEGER");
 }
@@ -303,6 +305,15 @@ function parseJsonText(text, fallback) {
     return parsed && typeof parsed === "object" ? parsed : fallback;
   } catch {
     return fallback;
+  }
+}
+
+function parseJsonArrayText(text) {
+  try {
+    const parsed = JSON.parse(String(text || "[]"));
+    return Array.isArray(parsed) ? parsed.map((value) => String(value || "").trim()).filter(Boolean) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -556,21 +567,22 @@ async function createShortLinkRow(id, input) {
   const title = String(input?.title || "").trim();
   const ownerUsername = normalizeUsername(input?.ownerUsername ?? input?.owner_username);
   const hidden = input?.hidden ? 1 : 0;
+  const tags = Array.isArray(input?.tags) ? input.tags.map((value) => String(value || "").trim()).filter(Boolean) : [];
   const params = input?.params && typeof input.params === "object" ? input.params : (input || {});
   const stmt = db.prepare(`
-    INSERT INTO short_links (id, params_json, title, owner_username, hidden, created_at, updated_at, hits)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO short_links (id, params_json, title, owner_username, hidden, tags_json, created_at, updated_at, hits)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
   `);
-  stmt.run([id, JSON.stringify(params), title, ownerUsername, hidden, now, now]);
+  stmt.run([id, JSON.stringify(params), title, ownerUsername, hidden, JSON.stringify(tags), now, now]);
   stmt.free();
   saveDb(db);
-  return { id, params, title, ownerUsername, hidden: Boolean(hidden), createdAt: now, updatedAt: now, hits: 0 };
+  return { id, params, title, ownerUsername, hidden: Boolean(hidden), tags, createdAt: now, updatedAt: now, hits: 0 };
 }
 
 async function getShortLinkRow(id) {
   const db = await getDb();
   const stmt = db.prepare(`
-    SELECT id, params_json, title, owner_username, hidden, created_at, updated_at, hits
+    SELECT id, params_json, title, owner_username, hidden, tags_json, created_at, updated_at, hits
     FROM short_links
     WHERE id = ?
     LIMIT 1
@@ -591,6 +603,7 @@ async function getShortLinkRow(id) {
     title: String(row.title || ""),
     ownerUsername: normalizeUsername(row.owner_username),
     hidden: Boolean(Number(row.hidden || 0)),
+    tags: parseJsonArrayText(row.tags_json),
     createdAt: String(row.created_at || ""),
     updatedAt: String(row.updated_at || ""),
     hits: Number(row.hits || 0),
@@ -607,13 +620,16 @@ async function updateShortLinkRow(id, params, meta = {}) {
     ? normalizeUsername(meta.ownerUsername)
     : existing.ownerUsername;
   const nextHidden = meta.hidden !== undefined ? (meta.hidden ? 1 : 0) : (existing.hidden ? 1 : 0);
+  const nextTags = meta.tags !== undefined && Array.isArray(meta.tags)
+    ? meta.tags.map((value) => String(value || "").trim()).filter(Boolean)
+    : existing.tags;
   const now = new Date().toISOString();
   const stmt = db.prepare(`
     UPDATE short_links
-    SET params_json = ?, title = ?, owner_username = ?, hidden = ?, updated_at = ?
+    SET params_json = ?, title = ?, owner_username = ?, hidden = ?, tags_json = ?, updated_at = ?
     WHERE id = ?
   `);
-  stmt.run([JSON.stringify(nextParams), nextTitle, nextOwnerUsername, nextHidden, now, id]);
+  stmt.run([JSON.stringify(nextParams), nextTitle, nextOwnerUsername, nextHidden, JSON.stringify(nextTags), now, id]);
   stmt.free();
   saveDb(db);
   return {
@@ -622,6 +638,7 @@ async function updateShortLinkRow(id, params, meta = {}) {
     title: nextTitle,
     ownerUsername: nextOwnerUsername,
     hidden: Boolean(nextHidden),
+    tags: nextTags,
     updatedAt: now,
   };
 }
@@ -934,6 +951,36 @@ async function getShortLinkPermissions(shortLinkId, actor) {
     canManageAccess: false,
     accessLevel: grant ? accessLevel : "",
   };
+}
+
+async function listShortLinksByTagForActor(tag, actor) {
+  const token = String(tag || "").trim().toLowerCase();
+  if (!token) return [];
+  const db = await getDb();
+  const stmt = db.prepare(`
+    SELECT id
+    FROM short_links
+    ORDER BY updated_at DESC, created_at DESC
+  `);
+  const rows = rowsFromStmt(stmt);
+  stmt.free();
+  const out = [];
+  for (const row of rows) {
+    const permission = await getShortLinkPermissions(String(row.id || ""), actor);
+    if (!permission?.canView) continue;
+    const tags = Array.isArray(permission.link.tags) ? permission.link.tags : [];
+    if (!tags.includes(token)) continue;
+    out.push({
+      link: permission.link,
+      permissions: {
+        canView: permission.canView,
+        canEdit: permission.canEdit,
+        canManageAccess: permission.canManageAccess,
+        accessLevel: permission.accessLevel || "",
+      },
+    });
+  }
+  return out;
 }
 
 async function getFavoritesRow(accountKey) {
@@ -1854,6 +1901,7 @@ export {
   createShortLinkRow,
   getShortLinkRow,
   getShortLinkPermissions,
+  listShortLinksByTagForActor,
   listShortLinkAccess,
   replaceShortLinkAccess,
   updateShortLinkRow,

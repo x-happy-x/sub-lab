@@ -15,6 +15,7 @@ import { renderHomePage } from "./home-page.js";
 import {
   PARAM_KEYS,
   sanitizeParams,
+  normalizeTags,
   createShortLink,
   getShortLink,
   getPublicShortLink,
@@ -27,6 +28,7 @@ import {
   deleteAuthSession,
   incrementShortLinkHits,
   getShortLinkPermissions,
+  listShortLinksByTagForActor,
   hasUsers,
   verifyUserCredentials,
   listUsers as listAuthUsers,
@@ -815,6 +817,7 @@ async function handleCreateShortLink(req, res) {
       ownerUsername: state.user?.username || "",
       id: body?.id ?? body?.shortId ?? body?.slug,
       hidden: Boolean(body?.hidden),
+      tags: body?.tags,
     });
     if (!created.ok) {
       sendJson(res, created.status || 400, created);
@@ -843,6 +846,7 @@ async function handleUpdateShortLink(req, res, id) {
       title: body?.title,
       id: body?.id ?? body?.shortId ?? body?.slug,
       hidden: body?.hidden === undefined ? undefined : Boolean(body.hidden),
+      tags: body?.tags,
     }, authActorFromState(state));
     if (!updated.ok) {
       sendJson(res, updated.status || 400, updated);
@@ -1706,6 +1710,41 @@ async function handleAdminUsersDelete(req, res, username) {
   sendJson(res, 200, { ok: true });
 }
 
+async function handleSearchByTag(req, reqUrl, res) {
+  try {
+    const state = await getAuthState(req);
+    const body = req.method === "POST" ? await readJsonBody(req) : {};
+    const tags = normalizeTags(reqUrl.searchParams.get("tag") || body?.tag || body?.tags);
+    const tag = tags[0] || "";
+    if (!tag) {
+      sendJson(res, 400, { ok: false, error: "tag is required" });
+      return;
+    }
+    const rows = await listShortLinksByTagForActor(tag, authActorFromState(state));
+    const subscriptions = rows.map((row) => {
+      const urls = shortLinkPublicUrls(req, row.link.id, row.link.params);
+      return {
+        id: row.link.id,
+        title: row.link.title,
+        tags: row.link.tags,
+        params: row.link.params,
+        url: urls.shortUrl,
+        shortUrl: urls.shortUrl,
+        resolvedUrl: urls.resolvedUrl,
+        permissions: row.permissions,
+      };
+    });
+    sendJson(res, 200, {
+      ok: true,
+      tag,
+      subscriptions,
+      items: subscriptions,
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "search failed" });
+  }
+}
+
 async function handleGetShortLinkAccess(req, res, id) {
   const access = await requireShortLinkPermission(req, res, id, "manage");
   if (!access) return;
@@ -1839,6 +1878,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "PUT" && routePath === "/api/favorites") {
     if (!(await requireApiAuth(req, res))) return;
     await handleFavoritesPut(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/search") {
+    if (!(await requireApiAuth(req, res))) return;
+    await handleSearchByTag(req, url, res);
     return;
   }
   if (req.method === "GET" && routePath === "/api/admin/users") {

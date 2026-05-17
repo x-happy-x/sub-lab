@@ -66,6 +66,11 @@ export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare, onOp
             hidden
           </Badge>
         ) : null}
+        {(item.tags || []).map((tag) => (
+          <Badge key={`tag:${tag}`} className="label">
+            #{tag}
+          </Badge>
+        ))}
         {item.labels.map((x) => (
           <Badge key={x} className="label">
             {x}

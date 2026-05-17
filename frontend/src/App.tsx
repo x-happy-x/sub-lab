@@ -203,6 +203,21 @@ function labelsFromPayload(p: SubscriptionPayload): string[] {
   return labels;
 }
 
+function normalizeTagsInput(value: string | string[] | undefined): string[] {
+  const source = Array.isArray(value) ? value : String(value || "").split(/[\s,;]+/);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of source) {
+    const tag = String(item || "").trim().replace(/^#+/, "").toLowerCase();
+    if (!tag || seen.has(tag)) continue;
+    if (!/^[a-z0-9._-]+$/.test(tag)) continue;
+    seen.add(tag);
+    out.push(tag.slice(0, 64));
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
 function formatLabelFromPayload(p: SubscriptionPayload): string {
   const fallback = String(p.output || "yml").trim() || "yml";
   return p.output_auto ? `auto -> ${fallback}` : fallback;
@@ -327,6 +342,7 @@ function normalizeFavoriteBackupItem(raw: unknown, index: number): FavoriteItem 
       clash_groups: String(payloadRaw.clash_groups || ""),
     },
     labels: Array.isArray(item.labels) ? item.labels.map((value) => String(value || "")).filter(Boolean) : [],
+    tags: normalizeTagsInput(Array.isArray(item.tags) ? item.tags.map((value) => String(value || "")) : []),
     shortId: String(item.shortId || "").trim() || undefined,
     hidden: Boolean(item.hidden),
     ts: Number.isFinite(tsValue) && tsValue > 0 ? tsValue : Date.now() + index,
@@ -533,6 +549,7 @@ export default function App() {
   const [name, setName] = useState("");
   const [shortIdDraft, setShortIdDraft] = useState("");
   const [hiddenDraft, setHiddenDraft] = useState(false);
+  const [tagsDraft, setTagsDraft] = useState("");
   const [clashGroupName, setClashGroupName] = useState("");
   const [clashGroupRegex, setClashGroupRegex] = useState("");
   const [clashGroupCountries, setClashGroupCountries] = useState("");
@@ -880,6 +897,7 @@ export default function App() {
     setName("");
     setShortIdDraft("");
     setHiddenDraft(false);
+    setTagsDraft("");
     setClashGroupName("");
     setClashGroupRegex("");
     setClashGroupCountries("");
@@ -1115,9 +1133,11 @@ export default function App() {
       let shortUrl = existing?.url || "";
       const nextPayload = { ...payload, sub_url: resolvedSubUrl };
       const requestedShortId = String(shortIdDraft || "").trim();
+      const tags = normalizeTagsInput(tagsDraft);
       const saveOptions = {
         id: requestedShortId || undefined,
         hidden: hiddenDraft,
+        tags,
       };
 
       const saved = shortId && !forceNew
@@ -1131,6 +1151,7 @@ export default function App() {
         url: shortUrl,
         shortId,
         hidden: saved.hidden,
+        tags: saved.tags,
         payload: nextPayload,
         labels: labelsFromPayload(nextPayload),
         ts: Date.now(),
@@ -1179,6 +1200,7 @@ export default function App() {
     setName(item.title);
     setShortIdDraft(item.shortId || "");
     setHiddenDraft(Boolean(item.hidden));
+    setTagsDraft((item.tags || []).join(", "));
     const nextPayload = { ...defaultPayload(), ...item.payload };
     setOriginalHappUrl("");
     setHappDecryptDismissedUrl("");
@@ -2568,6 +2590,12 @@ export default function App() {
             placeholder="my-sub или оставить пустым для генерации"
             value={shortIdDraft}
             onChange={(e) => setShortIdDraft(e.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80))}
+          />
+          <label className="composer-label">Теги</label>
+          <TextInput
+            placeholder="router, home"
+            value={tagsDraft}
+            onChange={(e) => setTagsDraft(e.target.value)}
           />
           <label className="share-access-row">
             <span>Скрыть подписку по короткой ссылке</span>
