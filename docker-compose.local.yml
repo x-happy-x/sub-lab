@@ -1,9 +1,9 @@
 services:
-  sub-mirror:
+  sub-lab:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sub-mirror:local
+    image: sub-lab:local
     ports:
       - "0.0.0.0:25500:8788"
     volumes:
@@ -17,6 +17,7 @@ services:
       CONVERTER_URL: "http://127.0.0.1:8787/sub"
       SOURCE_URL: "http://127.0.0.1:8788/source.txt"
       ADMIN_SEED_PATH: "/resources/admin.json"
+      SYNC_API_TOKEN: "${SYNC_API_TOKEN:-}"
       PROFILE_DIR: "/resources/profiles"
       APP_PORT: "8788"
       SUBCONVERTER_PORT: "8787"

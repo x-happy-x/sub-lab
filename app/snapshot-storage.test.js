@@ -6,7 +6,7 @@ import path from "node:path";
 
 test("snapshot storage foundation saves feed metadata and prunes old files", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `snapshots-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const {
@@ -130,7 +130,7 @@ test("snapshot storage foundation saves feed metadata and prunes old files", asy
 
 test("successful fetch snapshot stores raw body and detected format", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `fetch-snapshots-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const {
@@ -183,19 +183,25 @@ test("successful fetch snapshot stores raw body and detected format", async () =
 
   const normalized = await getNormalizedSnapshotBySourceSnapshotId(stored.id);
   assert.ok(normalized?.id > 0);
-  assert.equal(normalized?.parserVersion, "normalized-v1");
+  assert.equal(normalized?.parserVersion, "normalized-v2");
   const normalizedBody = JSON.parse(readSnapshotFile(normalized?.normalizedPath));
   assert.equal(normalizedBody?.meta?.sourceFormat, "json");
-  assert.equal(Array.isArray(normalizedBody?.nodes), true);
-  assert.equal(normalizedBody?.nodes?.[0]?.type, "vless");
-  assert.equal(Array.isArray(normalizedBody?.policy?.outbounds), true);
+  // Конфиг бандла — одна запись, его outbound-ы лежат внутри неё.
+  assert.equal(normalizedBody?.entries?.length, 1);
+  assert.equal(normalizedBody?.entries?.[0]?.name, "Demo");
+  assert.equal(normalizedBody?.entries?.[0]?.nodes?.[0]?.type, "vless");
+  // Исходный конфиг сохранён целиком: обратный рендер ничего не теряет.
+  assert.deepEqual(
+    normalizedBody?.entries?.[0]?.native,
+    JSON.parse(readSnapshotFile(latest?.bodyPath))[0],
+  );
 
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
 test("normalized snapshot can render raw and json outputs", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `normalized-render-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const { renderOutputFromNormalized, sourceFormatMatchesOutput, persistSuccessfulSourceSnapshot } = await import("./subscription.js");
@@ -241,7 +247,7 @@ test("normalized snapshot can render raw and json outputs", async () => {
 
 test("json normalized renderer preserves native xray bundle structure", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `normalized-json-native-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const { persistSuccessfulSourceSnapshot, renderOutputFromNormalized } = await import("./subscription.js");
@@ -326,10 +332,10 @@ test("json normalized renderer preserves native xray bundle structure", async ()
 
 test("yaml normalized renderer preserves clash groups and rules", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `normalized-clash-native-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
-  const { persistSuccessfulSourceSnapshot, renderClashFromNormalized } = await import("./subscription.js");
+  const { persistSuccessfulSourceSnapshot, renderOutputFromNormalized } = await import("./subscription.js");
   const { getNormalizedSnapshotBySourceSnapshotId } = await import("./sqlite-store.js");
   const { readSnapshotFile } = await import("./source-snapshots.js");
 
@@ -373,12 +379,12 @@ test("yaml normalized renderer preserves clash groups and rules", async () => {
 
   const normalized = await getNormalizedSnapshotBySourceSnapshotId(stored.id);
   const normalizedBody = JSON.parse(readSnapshotFile(normalized.normalizedPath));
-  assert.equal(Array.isArray(normalizedBody?.topology?.proxyGroups), true);
-  assert.equal(normalizedBody?.topology?.proxyGroups?.[0]?.name, "AUTO");
+  assert.equal(Array.isArray(normalizedBody?.groups), true);
+  assert.equal(normalizedBody?.groups?.[0]?.name, "AUTO");
   assert.deepEqual(normalizedBody?.policy?.rules, ["MATCH,AUTO"]);
   assert.match(String(normalizedBody?.policy?.dns?.raw || ""), /^dns:/m);
 
-  const rendered = await renderClashFromNormalized(normalizedBody);
+  const rendered = await renderOutputFromNormalized(normalizedBody, "clash");
   assert.equal(rendered.ok, true);
   assert.equal(rendered.conversion, "normalized-clash-native");
   assert.match(String(rendered.body), /^proxy-groups:\s*$/m);
@@ -390,7 +396,7 @@ test("yaml normalized renderer preserves clash groups and rules", async () => {
 
 test("subscription overrides are stored and applied to normalized nodes", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `overrides-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const {
@@ -440,9 +446,9 @@ test("subscription overrides are stored and applied to normalized nodes", async 
   const savedOverrides = await upsertSubscriptionOverrides(feed.id, {
     nodes: {
       byId: {
-        "node-0001": { name: "Renamed One" },
+        e0001n001: { name: "Renamed One" },
       },
-      disabledIds: ["node-0002"],
+      disabledIds: ["e0002n001"],
     },
   });
   assert.ok(savedOverrides?.id > 0);
@@ -458,28 +464,30 @@ test("subscription overrides are stored and applied to normalized nodes", async 
     version: loadedOverrides.version,
   });
 
-  assert.equal(effective.nodes.length, 1);
-  assert.equal(effective.nodes[0].name, "Renamed One");
+  // Каждая ссылка — своя запись, поэтому отключённая пропадает целиком.
+  const liveEntries = effective.entries.filter((entry) => entry.enabled !== false
+    && entry.nodes.some((node) => node.enabled !== false));
+  assert.equal(liveEntries.length, 1);
+  assert.equal(liveEntries[0].nodes[0].name, "Renamed One");
   assert.equal(effective.meta?.overridesApplied, true);
 
   const rawRendered = await renderOutputFromNormalized(effective, "raw");
   assert.equal(rawRendered.ok, true);
-  assert.match(String(rawRendered.body), /Node One/);
-  assert.doesNotMatch(String(rawRendered.body), /Node Two/);
+  assert.match(String(rawRendered.body), /#Renamed%20One$/m);
+  assert.doesNotMatch(String(rawRendered.body), /Node%20Two/);
 
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
 test("structural overrides update topology/policy and disable native render shortcut", async () => {
   const dataDir = path.resolve(process.cwd(), ".tmp-test-data", `structural-overrides-${crypto.randomBytes(4).toString("hex")}`);
-  process.env.SUB_MIRROR_DATA_DIR = dataDir;
+  process.env.SUB_LAB_DATA_DIR = dataDir;
   fs.rmSync(dataDir, { recursive: true, force: true });
 
   const {
     persistSuccessfulSourceSnapshot,
     applyOverridesToNormalized,
     renderOutputFromNormalized,
-    renderClashFromNormalized,
   } = await import("./subscription.js");
   const { getNormalizedSnapshotBySourceSnapshotId } = await import("./sqlite-store.js");
   const { readSnapshotFile } = await import("./source-snapshots.js");
@@ -534,11 +542,11 @@ test("structural overrides update topology/policy and disable native render shor
     },
   });
 
-  assert.equal(effective.topology.proxyGroups[0].type, "select");
+  assert.equal(effective.groups[0].type, "select");
   assert.deepEqual(effective.policy.rules, ["MATCH,DIRECT"]);
   assert.equal(effective.meta?.overridesApplied, true);
 
-  const clashRendered = await renderClashFromNormalized(effective);
+  const clashRendered = await renderOutputFromNormalized(effective, "clash");
   assert.equal(clashRendered.ok, true);
   assert.equal(clashRendered.conversion, "normalized-clash-patched");
   assert.match(String(clashRendered.body), /type:\s*select/);

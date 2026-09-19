@@ -21,10 +21,10 @@ test("short-link permissions deny anonymous and unrelated users by default", asy
   const ownerUsername = randomToken("owner");
   const strangerUsername = randomToken("stranger");
   const shortLinkId = randomToken("link");
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-perms-"));
-  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-lab-perms-"));
+  process.env.SUB_LAB_DATA_DIR = tempDir;
   t.after(() => {
-    delete process.env.SUB_MIRROR_DATA_DIR;
+    delete process.env.SUB_LAB_DATA_DIR;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -65,10 +65,10 @@ test("short-link permissions deny anonymous and unrelated users by default", asy
 test("public short-link lookup allows anonymous direct access", async (t) => {
   const ownerUsername = randomToken("owner");
   const shortLinkId = randomToken("link");
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-public-link-"));
-  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-lab-public-link-"));
+  process.env.SUB_LAB_DATA_DIR = tempDir;
   t.after(() => {
-    delete process.env.SUB_MIRROR_DATA_DIR;
+    delete process.env.SUB_LAB_DATA_DIR;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -96,10 +96,10 @@ test("public short-link lookup allows anonymous direct access", async (t) => {
 test("hidden short-link lookup denies public access but keeps owner access", async (t) => {
   const ownerUsername = randomToken("owner");
   const shortLinkId = randomToken("link");
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-hidden-link-"));
-  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-lab-hidden-link-"));
+  process.env.SUB_LAB_DATA_DIR = tempDir;
   t.after(() => {
-    delete process.env.SUB_MIRROR_DATA_DIR;
+    delete process.env.SUB_LAB_DATA_DIR;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -132,10 +132,10 @@ test("short-link update can rename id and preserve related access", async (t) =>
   const viewerUsername = randomToken("viewer");
   const oldId = randomToken("old");
   const newId = randomToken("new");
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-mirror-rename-link-"));
-  process.env.SUB_MIRROR_DATA_DIR = tempDir;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub-lab-rename-link-"));
+  process.env.SUB_LAB_DATA_DIR = tempDir;
   t.after(() => {
-    delete process.env.SUB_MIRROR_DATA_DIR;
+    delete process.env.SUB_LAB_DATA_DIR;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -165,4 +165,32 @@ test("short-link update can rename id and preserve related access", async (t) =>
   const grants = await listShortLinkAccess(newId);
   assert.equal(grants.length, 1);
   assert.equal(grants[0].username, viewerUsername);
+});
+
+test("account roles map to app roles without granting admin by default", async () => {
+  const { authUserFromAccount, SESSION_COOKIE, ACCOUNT_SESSION_COOKIE } = await import("./server.js");
+
+  const viewer = authUserFromAccount({ login: "Viewer", name: "V", access: { sub_mirror: { role: "viewer" } } });
+  assert.equal(viewer.username, "viewer");
+  assert.equal(viewer.role, "user");
+  assert.equal(viewer.accountRole, "viewer");
+  assert.equal(viewer.canEdit, false);
+
+  const editor = authUserFromAccount({ login: "editor", access: { sub_mirror: { role: "editor" } } });
+  assert.equal(editor.role, "user");
+  assert.equal(editor.canEdit, true);
+
+  const admin = authUserFromAccount({ login: "admin", access: { sub_mirror: { role: "admin" } } });
+  assert.equal(admin.role, "admin");
+  assert.equal(admin.canEdit, true);
+
+  // Роль в другом приложении сюда не переносится.
+  assert.equal(authUserFromAccount({ login: "x", access: { bigfam: { role: "admin" } } }), null);
+  assert.equal(authUserFromAccount({ login: "x", access: {} }), null);
+  assert.equal(authUserFromAccount(null), null);
+
+  // Cookie браузера не совпадает с общей cookie внутреннего API account:
+  // иначе вход в соседнее приложение подменял бы пользователя здесь.
+  assert.notEqual(SESSION_COOKIE, ACCOUNT_SESSION_COOKIE);
+  assert.equal(ACCOUNT_SESSION_COOKIE, "kartoteka_session");
 });

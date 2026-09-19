@@ -22,10 +22,10 @@ done
 
 HOST="192.168.99.21"
 USER_NAME="amagomedsharipov"
-REMOTE_DIR="${REMOTE_DIR:-/home/amagomedsharipov/projects/sub-mirror}"
+REMOTE_DIR="${REMOTE_DIR:-/home/amagomedsharipov/projects/sub-lab}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEY_SRC="${PROJECT_DIR}/homeserver"
-KEY_DST="${HOME}/.ssh/sub_mirror_homeserver"
+KEY_DST="${HOME}/.ssh/sub_lab_homeserver"
 SSH_OPTS=(
   -i "${KEY_DST}"
   -o IdentitiesOnly=yes
@@ -48,11 +48,14 @@ rsync -az --delete \
   --no-owner \
   --no-group \
   --exclude '.git/' \
+  --exclude '.env' \
   --exclude 'homeserver' \
   --exclude 'data/cache/' \
   --exclude 'data/cache/**' \
   --exclude 'data/profiles/' \
   --exclude 'data/profiles/**' \
+  --exclude 'data/snapshots/' \
+  --exclude 'data/snapshots/**' \
   --exclude 'data/local-sources/' \
   --exclude 'data/local-sources/**' \
   --exclude 'data/raw.txt' \
@@ -62,9 +65,9 @@ rsync -az --delete \
   --exclude 'data/source.txt' \
   --exclude 'data/short-links.json' \
   --exclude 'data/mock-sources.json' \
-  --exclude 'data/sub-mirror.sqlite' \
-  --exclude 'data/sub-mirror.sqlite-shm' \
-  --exclude 'data/sub-mirror.sqlite-wal' \
+  --exclude 'data/sub-lab.sqlite' \
+  --exclude 'data/sub-lab.sqlite-shm' \
+  --exclude 'data/sub-lab.sqlite-wal' \
   -e "ssh ${SSH_OPTS[*]}" \
   "${PROJECT_DIR}/" "${USER_NAME}@${HOST}:${REMOTE_DIR}/"
 
@@ -91,7 +94,7 @@ if [[ "${CLEAR_PROFILES}" == "1" ]]; then
   ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "REMOTE_DIR='${REMOTE_DIR}' bash -s" <<'REMOTE'
 set -euo pipefail
 cd "${REMOTE_DIR}"
-docker compose -f docker-compose.local.yml exec -T sub-mirror sh -lc '
+docker compose -f docker-compose.local.yml exec -T sub-lab sh -lc '
 mkdir -p /data/profiles/base /data/profiles/ua
 find /data/profiles/base -mindepth 1 -delete
 find /data/profiles/ua -mindepth 1 -delete

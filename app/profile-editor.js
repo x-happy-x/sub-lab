@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { PROFILE_ROOT_DIRS } from "./config.js";
+import { DATA_DIR, PROFILE_ROOT_DIRS } from "./config.js";
 import {
   deleteProfileFileRecord,
   getProfileFileRecord,
@@ -8,7 +8,7 @@ import {
   upsertProfileFileRecord,
 } from "./sqlite-store.js";
 
-const EDIT_ROOT = "/data/profiles";
+const EDIT_ROOT = path.join(DATA_DIR, "profiles");
 const VALID_KIND = new Set(["profiles", "base"]);
 
 function uniq(list) {

@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { MAX_SNAPSHOTS_PER_FEED } from "./config.js";
 import { pruneSubscriptionFeedSnapshots } from "./sqlite-store.js";
 
-const DATA_ROOT_DIR = path.resolve(process.env.SUB_MIRROR_DATA_DIR || "/data");
+const DATA_ROOT_DIR = path.resolve(process.env.SUB_LAB_DATA_DIR || process.env.SUB_MIRROR_DATA_DIR || "/data");
 const SNAPSHOT_ROOT_DIR = path.join(DATA_ROOT_DIR, "snapshots");
 const RAW_SNAPSHOT_DIR = path.join(SNAPSHOT_ROOT_DIR, "raw");
 const NORMALIZED_SNAPSHOT_DIR = path.join(SNAPSHOT_ROOT_DIR, "normalized");

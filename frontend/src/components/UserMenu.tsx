@@ -43,7 +43,7 @@ export function UserMenu({ user, onLogout, onAdmin, onHome }: Props) {
             <UserIcon className="btn-icon" />
             <div>
               <div className="user-name">{user.username}</div>
-              <div className="user-role">{user.role}</div>
+              <div className="user-role">{user.accountRole || user.role}</div>
             </div>
           </div>
           <div className="user-dropdown-actions">

@@ -1,9 +1,15 @@
+import type { ReactNode } from "react";
 import type { FavoriteItem } from "../types";
-import { EditIcon, TrashIcon, TestIcon, ShareIcon, ProfileIcon } from "../icons";
+import { EditIcon, TrashIcon, TestIcon, ShareIcon, ProfileIcon, CopyIcon } from "../icons";
+import { copyToClipboard } from "../lib/clipboard";
 import { Badge, Card, IconButton, Tooltip } from "@x-happy-x/ui-kit";
 
 type Props = {
   item: FavoriteItem;
+  /** Роль позволяет менять подписки. У наблюдателя карточка только читается. */
+  canEdit: boolean;
+  /** Полный набор инструментов: overrides, устройства, тестер. */
+  showAdvanced: boolean;
   onEdit: () => void;
   onDelete: () => void;
   onTest: () => void;
@@ -12,43 +18,52 @@ type Props = {
   onOpenOverrides: () => void;
 };
 
-export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare, onOpenUsers, onOpenOverrides }: Props) {
-  const canEdit = item.permissions?.canEdit !== false;
+function TipIcon({ tip, label, icon, onClick, tone }: {
+  tip: string;
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+  tone?: "danger";
+}) {
+  return (
+    <Tooltip content={tip}>
+      <span className="ui-tip-wrap">
+        <IconButton aria-label={label} icon={icon} tone={tone} onClick={onClick} />
+      </span>
+    </Tooltip>
+  );
+}
+
+export function SubscriptionCard({ item, canEdit, showAdvanced, onEdit, onDelete, onTest, onShare, onOpenUsers, onOpenOverrides }: Props) {
+  // Право на запись — это пересечение роли и доступа к конкретной ссылке:
+  // редактор с доступом «просмотр» тоже ничего не меняет.
+  const mayEdit = canEdit && item.permissions?.canEdit !== false;
+  // Выданную подписку убрать из своего списка нельзя: она придёт обратно,
+  // пока доступ не отозвали.
+  const mayDelete = mayEdit && !item.derived;
+  const title = showAdvanced
+    ? <button type="button" className="sub-name sub-name-btn" onClick={onOpenUsers}>{item.title}</button>
+    : <span className="sub-name">{item.title}</span>;
   return (
     <Card
       className="sub-card"
-      title={(
-        <button type="button" className="sub-name sub-name-btn" onClick={onOpenUsers}>
-          {item.title}
-        </button>
-      )}
+      title={title}
       actions={(
         <div className="toolbar">
-          <Tooltip content="Тест">
-            <span className="ui-tip-wrap">
-              <IconButton aria-label="Тест" icon={<TestIcon className="btn-icon" />} onClick={onTest} />
-            </span>
-          </Tooltip>
-          <Tooltip content="Поделиться">
-            <span className="ui-tip-wrap">
-              <IconButton aria-label="Поделиться" icon={<ShareIcon className="btn-icon" />} onClick={onShare} />
-            </span>
-          </Tooltip>
-          <Tooltip content="Overrides">
-            <span className="ui-tip-wrap">
-              <IconButton aria-label="Overrides" icon={<ProfileIcon className="btn-icon" />} onClick={onOpenOverrides} disabled={!canEdit} />
-            </span>
-          </Tooltip>
-          <Tooltip content="Редактировать">
-            <span className="ui-tip-wrap">
-              <IconButton aria-label="Редактировать" icon={<EditIcon className="btn-icon" />} onClick={onEdit} disabled={!canEdit} />
-            </span>
-          </Tooltip>
-          <Tooltip content="Удалить">
-            <span className="ui-tip-wrap">
-              <IconButton aria-label="Удалить" icon={<TrashIcon className="btn-icon" />} tone="danger" onClick={onDelete} disabled={!canEdit} />
-            </span>
-          </Tooltip>
+          <TipIcon tip="Скопировать ссылку" label="Скопировать ссылку" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(item.url)} />
+          <TipIcon tip="Открыть страницу подключения" label="Открыть страницу подключения" icon={<ShareIcon className="btn-icon" />} onClick={onShare} />
+          {showAdvanced ? (
+            <TipIcon tip="Тест" label="Тест" icon={<TestIcon className="btn-icon" />} onClick={onTest} />
+          ) : null}
+          {showAdvanced && mayEdit ? (
+            <TipIcon tip="Overrides" label="Overrides" icon={<ProfileIcon className="btn-icon" />} onClick={onOpenOverrides} />
+          ) : null}
+          {mayEdit ? (
+            <TipIcon tip="Редактировать" label="Редактировать" icon={<EditIcon className="btn-icon" />} onClick={onEdit} />
+          ) : null}
+          {mayDelete ? (
+            <TipIcon tip="Удалить" label="Удалить" icon={<TrashIcon className="btn-icon" />} tone="danger" onClick={onDelete} />
+          ) : null}
         </div>
       )}
     >
@@ -56,6 +71,8 @@ export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare, onOp
         <a href={item.url} target="_blank" rel="noreferrer noopener">{item.url}</a>
       </div>
       <div className="labels">
+        {item.derived ? <Badge className="label">выдана вам</Badge> : null}
+        {item.permissions?.missing ? <Badge className="label">ссылка не создана</Badge> : null}
         {item.permissions?.accessLevel ? (
           <Badge className="label">
             {item.permissions.accessLevel}
@@ -71,11 +88,11 @@ export function SubscriptionCard({ item, onEdit, onDelete, onTest, onShare, onOp
             #{tag}
           </Badge>
         ))}
-        {item.labels.map((x) => (
+        {showAdvanced ? item.labels.map((x) => (
           <Badge key={x} className="label">
             {x}
           </Badge>
-        ))}
+        )) : null}
       </div>
     </Card>
   );

@@ -4,59 +4,43 @@
 
 ### Completed
 
-- storage foundation is implemented:
-  - `subscription_feeds`
-  - `source_snapshots`
-  - `normalized_snapshots`
-  - `subscription_overrides`
-  - raw and normalized snapshot files on disk
-  - per-feed snapshot pruning via global retention limit
-- successful upstream fetches are persisted as raw source snapshots with detected source format
-- successful upstream fetches are parsed into `normalized-v1` and stored as normalized snapshots
-- runtime request flow already uses snapshot fallback:
-  - `/sub` falls back to latest stored snapshot if fresh fetch fails
-  - `/last` can fall back to latest stored snapshot after refresh/cache miss
-- same-format shortcut is implemented:
-  - if source format equals requested output and there are no explicit overrides, raw snapshot is returned directly
-- normalized render path is implemented for:
-  - `raw`
-  - `raw_base64`
-  - `json`
-  - `clash`
-- JSON/Xray normalized path preserves native source structure when no overrides are applied:
-  - `extensions.xray.configs`
-  - `balancers`
-  - `observatory`
-  - `routing.rules`
-  - multi-config bundle structure
-- Clash/YAML normalized path preserves native source structure when no overrides are applied:
-  - original YAML text
-  - `proxy-groups`
-  - `rules`
-  - `dns`
-- override storage and application layer are implemented:
-  - `nodes.byId`
-  - `nodes.byName`
-  - `nodes.disabledIds`
-  - topology overrides for proxy groups, balancers and observatory
-  - policy overrides for routing rules and DNS
-- overrides API exists for short links:
-  - `GET /api/short-links/:id/overrides`
-  - `PUT /api/short-links/:id/overrides`
-- frontend already has a basic overrides editor and API client helpers
+- storage foundation: `subscription_feeds`, `source_snapshots`, `normalized_snapshots`,
+  `subscription_overrides`, snapshot files on disk, per-feed pruning by a global limit
+- successful upstream fetches are persisted as raw snapshots with a detected source format
+- successful upstream fetches are parsed into `normalized-v2` and stored as normalized snapshots
+- runtime request flow uses snapshot fallback on `/sub` and `/last`
+- same-format shortcut: raw snapshot is returned directly when the source format equals the
+  requested output and there are no explicit overrides
+- **entry-based normalized model (`normalized-v2`, `app/model/`).** The source is parsed into
+  `entries`, not a flat node list. One entry is one row in the client: one Xray config of a
+  JSON bundle, one Clash proxy, one raw link. Balancer candidates, bridges, loopbacks,
+  `routing`, `dns` and `observatory` stay inside the entry instead of surfacing as extra
+  servers. Each entry keeps its source object in `entry.native`, so rendering back to the
+  source format is lossless.
+- **Xray parser resolves the entry representative**: the first catch-all routing rule decides
+  the default target; a balancer target resolves to its cheapest candidate (`strategy.settings.costs`),
+  selectors match by prefix as Xray does. Non-vless protocols (hysteria, tuic, trojan,
+  shadowsocks, wireguard) are captured too.
+- **node modes** for formats without nesting: `collapse` (default), `group`, `expand`,
+  exposed as the `nodes` request parameter, stored on short links and switchable in the UI.
+  Reverse conversion to the source format ignores the mode.
+- normalized render path for `raw`, `raw_base64`, `json`, `clash`
+- override storage and application over entries and their nodes; Clash overrides are applied
+  by patching the original YAML so unparsed sections survive
+- overrides API for short links: `GET`/`PUT /api/short-links/:id/overrides`
+- the live conversion pipeline no longer flattens JSON bundles through raw URIs
 
 ### In Progress
 
 - format-aware overrides UI by output type
-- richer structured editing for `raw`, `clash`, and `json`
+- richer structured editing for `raw`, `clash` and `json`
 
 ### Not Done Yet
 
-- admin/settings UI for snapshot retention limit
-- full native structural re-render for overridden JSON/Xray bundles
-- full native structural re-render for overridden Clash configs
-- merge pipeline fully rewritten around normalized model only
-- dedicated structured overrides editor for all advanced fields without raw JSON fallback
+- admin/settings UI for the snapshot retention limit
+- merge pipeline still goes through `OUTPUT_RAW` instead of merging normalized models
+- dedicated structured overrides editor for advanced fields without a raw JSON fallback
+- entry-level overrides are stored and applied but not yet exposed in the UI
 
 ## Goal
 

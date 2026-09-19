@@ -55,7 +55,7 @@ function renderHomePage() {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sub Mirror Studio</title>
+  <title>Sub Lab Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -490,7 +490,7 @@ function renderHomePage() {
       <div>
         <h1>SubLab</h1>
         <p class="subtitle">Лаборатория подписок</p>
-        <span style="display:none">Sub Mirror</span>
+        <span style="display:none">Sub Lab</span>
       </div>
     </section>
 
@@ -1016,8 +1016,8 @@ function renderHomePage() {
     const subTestHeadersResultEl = qs("subTestHeadersResult");
     const subTestCacheResultEl = qs("subTestCacheResult");
 
-    const STORAGE_KEY = "submirror.favorites.v2";
-    const STORAGE_KEY_LEGACY = "submirror.favorites.v1";
+    const STORAGE_KEY = "sublab.favorites.v2";
+    const STORAGE_KEY_LEGACY = "sublab.favorites.v1";
     const selectedBaseProfiles = [];
 
     let currentShortId = "";

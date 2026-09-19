@@ -14,7 +14,7 @@ import type {
 } from "../types";
 import type { FavoriteItem } from "../types";
 
-const PARAM_KEYS = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups"] as const;
+const PARAM_KEYS = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups", "nodes"] as const;
 
 function currentBrowserOrigin(): string {
   if (typeof window === "undefined" || !window.location?.origin) return "";
@@ -61,12 +61,22 @@ export async function fetchAuthState(): Promise<{ enabled: boolean; authenticate
       ? {
           username: String(json.auth.user.username || ""),
           role: String(json.auth.user.role || "user") === "admin" ? "admin" : "user",
+          accountRole: String(json.auth.user.accountRole || "none") as AuthUser["accountRole"],
+          canEdit: Boolean(json.auth.user.canEdit),
         }
       : null,
   };
 }
 
 export async function login(username: string, password: string): Promise<void> {
+  void username;
+  void password;
+  const target = `/auth/start?return=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+  window.location.assign(target);
+  return new Promise(() => {});
+}
+
+export async function legacyPasswordLogin(username: string, password: string): Promise<void> {
   const resp = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -80,6 +90,7 @@ export async function logout(): Promise<void> {
   const resp = await fetch("/api/auth/logout", { method: "POST" });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "logout failed");
+  if (json.redirect) window.location.assign(String(json.redirect));
 }
 
 export type ShortLinkSaveOptions = {
@@ -674,26 +685,56 @@ export async function adminDeleteUser(username: string): Promise<void> {
   if (!resp.ok || !json.ok) throw new Error(json.error || "admin delete user failed");
 }
 
+function normalizeFavoriteEntry(entry: unknown): FavoriteItem {
+  const item = (entry || {}) as FavoriteItem & { permissions?: ShortLinkPermissions };
+  const permissions = item.permissions && typeof item.permissions === "object"
+    ? {
+      canView: Boolean(item.permissions.canView),
+      canEdit: Boolean(item.permissions.canEdit),
+      canManageAccess: Boolean(item.permissions.canManageAccess),
+      accessLevel: String(item.permissions.accessLevel || "") === "edit"
+        ? "edit"
+        : (String(item.permissions.accessLevel || "") === "view" ? "view" : ""),
+      missing: Boolean(item.permissions.missing),
+    } as ShortLinkPermissions
+    : undefined;
+  return normalizeFavoriteUrl({ ...item, permissions });
+}
+
 export async function fetchFavorites(): Promise<FavoriteItem[]> {
   const resp = await fetch("/api/favorites");
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "favorites fetch failed");
-  return Array.isArray(json.favorites)
-    ? json.favorites.map((entry: unknown) => {
-      const item = (entry || {}) as FavoriteItem & { permissions?: ShortLinkPermissions };
-      const permissions = item.permissions && typeof item.permissions === "object"
-        ? {
-          canView: Boolean(item.permissions.canView),
-          canEdit: Boolean(item.permissions.canEdit),
-          canManageAccess: Boolean(item.permissions.canManageAccess),
-          accessLevel: String(item.permissions.accessLevel || "") === "edit"
-            ? "edit"
-            : (String(item.permissions.accessLevel || "") === "view" ? "view" : ""),
-        } as ShortLinkPermissions
-        : undefined;
-      return normalizeFavoriteUrl({ ...item, permissions });
-    })
-    : [];
+  return Array.isArray(json.favorites) ? json.favorites.map(normalizeFavoriteEntry) : [];
+}
+
+export type FavoritesRestoreReport = {
+  total: number;
+  created: number;
+  kept: number;
+  skipped: number;
+  skippedTitles: string[];
+};
+
+/** Восстановление копии: сервер заново создаёт короткие ссылки, которых уже нет. */
+export async function restoreFavorites(list: FavoriteItem[]): Promise<{ favorites: FavoriteItem[]; report: FavoritesRestoreReport }> {
+  const resp = await fetch("/api/favorites/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ favorites: Array.isArray(list) ? list : [] }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "favorites restore failed");
+  return {
+    favorites: Array.isArray(json.favorites) ? json.favorites.map(normalizeFavoriteEntry) : [],
+    report: {
+      total: Number(json.report?.total || 0),
+      created: Number(json.report?.created || 0),
+      kept: Number(json.report?.kept || 0),
+      skipped: Number(json.report?.skipped || 0),
+      skippedTitles: Array.isArray(json.report?.skippedTitles) ? json.report.skippedTitles.map(String) : [],
+    },
+  };
 }
 
 export async function saveFavorites(list: FavoriteItem[]): Promise<FavoriteItem[]> {
@@ -704,5 +745,5 @@ export async function saveFavorites(list: FavoriteItem[]): Promise<FavoriteItem[
   });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "favorites save failed");
-  return Array.isArray(json.favorites) ? (json.favorites as FavoriteItem[]).map((item) => normalizeFavoriteUrl(item)) : [];
+  return Array.isArray(json.favorites) ? json.favorites.map(normalizeFavoriteEntry) : [];
 }

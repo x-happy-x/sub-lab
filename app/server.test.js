@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import {
   normalizeTags,
 } from "./short-links.js";
@@ -109,7 +110,7 @@ test("short-link type override normalizes raw and clash aliases", () => {
 
 test("local source path resolves bundled bypass list", () => {
   const localPath = resolveLocalSourcePath("app/test-fixtures/local-source.txt");
-  assert.ok(localPath.endsWith("app/test-fixtures/local-source.txt"));
+  assert.ok(localPath.split(path.sep).join("/").endsWith("app/test-fixtures/local-source.txt"));
 });
 
 test("fetchWithNode reads local bypass list file", async () => {
@@ -279,39 +280,67 @@ test("produceOutput converts clash yaml fixture to raw URI list", async () => {
   assert.ok(uriLines.some((line) => line.includes("host=ws.example.net")), "expected ws host in converted raw URI");
 });
 
-test("produceOutput converts JSON outbound bundle fixture to raw URI list", async () => {
+const vlessUris = (body) =>
+  String(body || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("vless://"));
+
+test("produceOutput collapses a JSON config bundle to one URI per config", async () => {
   const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
   const jsonInput = fs.readFileSync(fixturePath, "utf8");
   const rawResult = await produceOutput(jsonInput, "raw");
 
   assert.equal(rawResult.ok, true);
   assert.equal(rawResult.contentType, "text/plain; charset=utf-8");
-  assert.equal(typeof rawResult.body, "string");
-  assert.match(rawResult.conversion, /json-fallback-raw|none-raw/);
 
-  const uriLines = rawResult.body
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("vless://"));
+  // В фикстуре один конфиг с 31 outbound-ом: пользователь видит одну строку.
+  const uriLines = vlessUris(rawResult.body);
+  assert.equal(uriLines.length, 1, "expected one URI per config in the default collapse mode");
+  assert.ok(uriLines[0].includes("security=reality"), "expected reality params in the collapsed URI");
+  assert.ok(
+    uriLines[0].includes("#%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%91%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9"),
+    "expected the config remarks to name the collapsed URI",
+  );
+});
 
-  assert.ok(uriLines.length >= 31, "expected vless URIs extracted from JSON outbounds");
-  assert.ok(uriLines.some((line) => line.includes("security=reality")), "expected reality params in extracted URIs");
-  assert.ok(uriLines.some((line) => line.includes("#%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%91%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9")), "expected encoded remarks in URI names");
+test("produceOutput expands JSON bundle candidates when asked", async () => {
+  const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
+  const jsonInput = fs.readFileSync(fixturePath, "utf8");
+
+  const expanded = await produceOutput(jsonInput, "raw", { nodesMode: "expand" });
+  assert.equal(expanded.ok, true);
+  assert.ok(vlessUris(expanded.body).length >= 31, "expected every outbound in expand mode");
+
+  const grouped = await produceOutput(jsonInput, "raw", { nodesMode: "group" });
+  assert.equal(grouped.ok, true);
+  assert.ok(vlessUris(grouped.body).length >= 31, "expected balancer candidates in group mode");
 });
 
 test("produceOutput converts JSON outbound bundle fixture to clash yaml", async () => {
   const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
   const jsonInput = fs.readFileSync(fixturePath, "utf8");
-  const clashResult = await produceOutput(jsonInput, "clash");
+  const clashResult = await produceOutput(jsonInput, "clash", { nodesMode: "expand" });
 
   assert.equal(clashResult.ok, true);
   assert.equal(clashResult.contentType, "text/yaml; charset=utf-8");
   assert.equal(clashResult.conversion, "json-clash-full-config");
-  assert.equal(typeof clashResult.body, "string");
   assert.match(clashResult.body, /^proxies:\s*$/m);
   assert.match(clashResult.body, /type:\s*vless/);
   assert.match(clashResult.body, /servername:\s*tradingview\.com/);
   assert.match(clashResult.body, /name:\s*"AUTO · Самый Быстрый"/);
+});
+
+test("produceOutput keeps one clash proxy per JSON config by default", async () => {
+  const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
+  const jsonInput = fs.readFileSync(fixturePath, "utf8");
+  const clashResult = await produceOutput(jsonInput, "clash");
+
+  assert.equal(clashResult.ok, true);
+  const proxiesBlock = String(clashResult.body).split(/^proxy-groups:/m)[0];
+  const proxyNames = proxiesBlock.match(/^ {2}- name:/gm) || [];
+  assert.equal(proxyNames.length, 1, "expected a single clash proxy for a single config");
+  assert.match(clashResult.body, /^\s+- name:\s*"Самый Быстрый"$/m);
 });
 
 test("produceOutput preserves JSON config groups in clash yaml", async () => {
@@ -344,14 +373,22 @@ test("produceOutput preserves JSON config groups in clash yaml", async () => {
       { tag: "node-01", address: "two.example.com", id: "22222222-2222-4222-8222-222222222222" },
     ]),
   ]);
-  const clashResult = await produceOutput(jsonInput, "clash");
 
-  assert.equal(clashResult.ok, true);
-  assert.equal(clashResult.conversion, "json-clash-full-config");
-  assert.match(clashResult.body, /name:\s*"AUTO · LTE #1"/);
-  assert.doesNotMatch(clashResult.body, /name:\s*"AUTO · LTE #2"/);
-  assert.match(clashResult.body, /^\s+- "LTE #1 node-01"$/m);
-  assert.match(clashResult.body, /^\s+- "LTE #2"$/m);
+  // Свёрнуто: по одной строке на конфиг, внутренних узлов не видно.
+  const collapsed = await produceOutput(jsonInput, "clash");
+  assert.equal(collapsed.ok, true);
+  assert.match(collapsed.body, /^\s+- name:\s*"LTE #1"$/m);
+  assert.match(collapsed.body, /^\s+- name:\s*"LTE #2"$/m);
+  assert.doesNotMatch(collapsed.body, /LTE #1 · node-02/);
+
+  // Группами: конфиг с несколькими узлами становится своей url-test группой.
+  const grouped = await produceOutput(jsonInput, "clash", { nodesMode: "group" });
+  assert.equal(grouped.ok, true);
+  assert.equal(grouped.conversion, "json-clash-full-config");
+  assert.match(grouped.body, /name:\s*"AUTO · LTE #1"/);
+  assert.doesNotMatch(grouped.body, /name:\s*"AUTO · LTE #2"/);
+  assert.match(grouped.body, /^\s+- "LTE #1 · node-01"$/m);
+  assert.match(grouped.body, /^\s+- "LTE #2"$/m);
 });
 
 test("produceOutput adds configured regex clash groups", async () => {
@@ -379,15 +416,30 @@ test("produceOutput adds configured regex clash groups", async () => {
     ],
   });
   const clashGroups = JSON.stringify([{ name: "RU manual", type: "regex", regex: "ru-" }]);
-  const clashResult = await produceOutput(jsonInput, "clash", { clashGroups });
+  const clashResult = await produceOutput(jsonInput, "clash", { clashGroups, nodesMode: "expand" });
 
   assert.equal(clashResult.ok, true);
   assert.match(clashResult.body, /name:\s*"AUTO · RU manual"/);
 });
 
+test("JSON bundle survives a round trip back to JSON unchanged", async () => {
+  const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
+  const jsonInput = fs.readFileSync(fixturePath, "utf8");
+
+  for (const nodesMode of ["collapse", "group", "expand"]) {
+    const jsonResult = await produceOutput(jsonInput, "json", { nodesMode });
+    assert.equal(jsonResult.ok, true);
+    assert.deepEqual(
+      JSON.parse(String(jsonResult.body)),
+      JSON.parse(jsonInput),
+      `json->json must be lossless regardless of nodes mode (${nodesMode})`,
+    );
+  }
+});
+
 test("home page contains form, qr and app buttons", () => {
   const html = renderHomePage();
-  assert.ok(html.includes("Sub Mirror"));
+  assert.ok(html.includes("Sub Lab"));
   assert.ok(html.includes('id="sub_url"'));
   assert.ok(html.includes('id="output"'));
   assert.ok(html.includes('id="openHapp"'));

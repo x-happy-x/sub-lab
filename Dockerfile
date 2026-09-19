@@ -17,20 +17,18 @@ RUN if command -v apk >/dev/null 2>&1; then \
 
 COPY app/package.json ./package.json
 COPY app/package-lock.json ./package-lock.json
-RUN npm install
+COPY app/node_modules ./node_modules
 COPY app/*.js ./
+# Нормализованная модель лежит в подкаталоге: `app/*.js` его не забирает.
+COPY app/model ./model
 COPY app/bin ./bin
 COPY resources/ua-catalog.json /resources/ua-catalog.json
 COPY resources/admin.json /resources/admin.json
 COPY resources/apps.yml /resources/apps.yml
 COPY resources/app-guides /resources/app-guides
-COPY frontend/package.json /frontend/package.json
-COPY frontend/package-lock.json /frontend/package-lock.json
-COPY frontend/vendor /frontend/vendor
-RUN cd /frontend && npm install
-COPY frontend /frontend
-RUN cd /frontend && npm run build && cp -r dist /app/frontend-dist
+COPY frontend/dist /frontend-dist
 COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENV APP_PORT=8788 \
     SUBCONVERTER_PORT=8787 \

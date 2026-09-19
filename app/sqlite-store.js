@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
 import { MAX_SNAPSHOTS_PER_FEED } from "./config.js";
 
-const DATA_ROOT_DIR = path.resolve(process.env.SUB_MIRROR_DATA_DIR || "/data");
-const DB_PATH = path.join(DATA_ROOT_DIR, "sub-mirror.sqlite");
+const DATA_ROOT_DIR = path.resolve(process.env.SUB_LAB_DATA_DIR || process.env.SUB_MIRROR_DATA_DIR || "/data");
+const DB_PATH = path.join(DATA_ROOT_DIR, "sub-lab.sqlite");
+const LEGACY_DB_PATH = path.join(DATA_ROOT_DIR, "sub-mirror.sqlite");
 const ADMIN_SEED_PATH = process.env.ADMIN_SEED_PATH || "";
 let sqlModulePromise = null;
 let dbPromise = null;
@@ -14,6 +15,17 @@ let dbPromise = null;
 function ensureDataDir() {
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  adoptLegacyDatabase();
+}
+
+/** Переезд с прежнего имени сервиса: база и журналы WAL переносятся один раз. */
+function adoptLegacyDatabase() {
+  if (fs.existsSync(DB_PATH) || !fs.existsSync(LEGACY_DB_PATH)) return;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const from = `${LEGACY_DB_PATH}${suffix}`;
+    if (fs.existsSync(from)) fs.renameSync(from, `${DB_PATH}${suffix}`);
+  }
+  console.log(`[INFO] перенёс базу ${LEGACY_DB_PATH} -> ${DB_PATH}`);
 }
 
 async function loadSqlModule() {
@@ -239,6 +251,14 @@ function rowsFromStmt(stmt) {
   return rows;
 }
 
+function allRows(db, sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const rows = rowsFromStmt(stmt);
+  stmt.free();
+  return rows;
+}
+
 function ensureColumnExists(db, tableName, columnName, definition) {
   const infoStmt = db.prepare(`PRAGMA table_info(${tableName})`);
   const columns = new Set();
@@ -323,6 +343,16 @@ function safeJsonStringify(value, fallback = "{}") {
   } catch {
     return fallback;
   }
+}
+
+function parseJsonObjectText(text) {
+  const parsed = parseJsonText(text, {});
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+function sanitizeIso(value, fallback = nowIso()) {
+  const raw = String(value || "").trim();
+  return raw && !Number.isNaN(Date.parse(raw)) ? raw : fallback;
 }
 
 function toSubscriptionFeed(row) {
@@ -886,8 +916,6 @@ async function replaceShortLinkAccess(shortLinkId, grants) {
     const username = normalizeUsername(item?.username);
     if (!username || seen.has(username)) continue;
     seen.add(username);
-    const userRow = getUserRowByUsername(db, username);
-    if (!userRow) continue;
     normalized.push({
       username,
       accessLevel: normalizeAccessLevel(item?.accessLevel ?? item?.access_level),
@@ -979,6 +1007,36 @@ async function listShortLinksByTagForActor(tag, actor) {
         accessLevel: permission.accessLevel || "",
       },
     });
+  }
+  return out;
+}
+
+/**
+ * Короткие ссылки, к которым пользователю выдали доступ.
+ *
+ * Свои ссылки сюда не попадают: их владелец и так держит в своём списке, а вот
+ * выданные доступы иначе не видны никак — наблюдателю показывать было нечего.
+ */
+async function listShortLinksGrantedTo(username) {
+  const login = normalizeUsername(username);
+  if (!login) return [];
+  const db = await getDb();
+  const stmt = db.prepare(`
+    SELECT a.short_link_id AS id, a.access_level AS access_level
+    FROM short_link_access a
+    JOIN short_links s ON s.id = a.short_link_id
+    WHERE a.username = ?
+    ORDER BY s.updated_at DESC, s.created_at DESC
+  `);
+  stmt.bind([login]);
+  const rows = rowsFromStmt(stmt);
+  stmt.free();
+  const out = [];
+  for (const row of rows) {
+    const link = await getShortLinkRow(String(row.id || ""));
+    if (!link) continue;
+    if (normalizeUsername(link.ownerUsername) === login) continue;
+    out.push({ link, accessLevel: normalizeAccessLevel(row.access_level) });
   }
   return out;
 }
@@ -1896,12 +1954,473 @@ async function pruneSubscriptionFeedSnapshots(feedId, retainCount = MAX_SNAPSHOT
   return removed;
 }
 
+async function exportSyncBundle(options = {}) {
+  const db = await getDb();
+  const includeProfiles = options?.profiles !== false;
+  const users = allRows(db, `
+    SELECT username, role, created_at, updated_at
+    FROM users
+    ORDER BY username ASC
+  `).map(toPublicUser);
+
+  const shortLinks = allRows(db, `
+    SELECT id, params_json, title, owner_username, hidden, tags_json, created_at, updated_at, hits
+    FROM short_links
+    ORDER BY updated_at DESC, id ASC
+  `).map((row) => ({
+    id: String(row.id || ""),
+    params: parseJsonObjectText(row.params_json),
+    title: String(row.title || ""),
+    ownerUsername: normalizeUsername(row.owner_username),
+    hidden: Number(row.hidden || 0) > 0,
+    tags: parseJsonArrayText(row.tags_json),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+    hits: Math.max(0, Number(row.hits || 0)),
+  }));
+
+  const access = allRows(db, `
+    SELECT short_link_id, username, access_level, created_at, updated_at
+    FROM short_link_access
+    ORDER BY short_link_id ASC, username ASC
+  `).map((row) => ({
+    shortLinkId: String(row.short_link_id || ""),
+    username: normalizeUsername(row.username),
+    accessLevel: normalizeAccessLevel(row.access_level),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+  }));
+
+  const favorites = allRows(db, `
+    SELECT account_key, favorites_json, updated_at
+    FROM favorites_store
+    ORDER BY account_key ASC
+  `).map((row) => ({
+    accountKey: String(row.account_key || ""),
+    favorites: Array.isArray(parseJsonText(row.favorites_json, [])) ? parseJsonText(row.favorites_json, []) : [],
+    updatedAt: String(row.updated_at || ""),
+  }));
+
+  const userPolicies = allRows(db, `
+    SELECT short_link_id, max_users, blocked_message, limit_message, updated_at
+    FROM short_link_user_policy
+    ORDER BY short_link_id ASC
+  `).map((row) => ({
+    shortLinkId: String(row.short_link_id || ""),
+    maxUsers: Math.max(0, Number(row.max_users || 0)),
+    blockedMessage: String(row.blocked_message || ""),
+    limitMessage: String(row.limit_message || ""),
+    updatedAt: String(row.updated_at || ""),
+  }));
+
+  const linkUsers = allRows(db, `
+    SELECT short_link_id, hwid, first_seen_at, last_seen_at, blocked, block_reason,
+           last_ip, last_user_agent, last_device_model, last_device_os, last_app, last_device, last_accept_language
+    FROM short_link_users
+    ORDER BY short_link_id ASC, last_seen_at DESC
+  `).map((row) => ({
+    shortLinkId: String(row.short_link_id || ""),
+    hwid: String(row.hwid || ""),
+    firstSeenAt: String(row.first_seen_at || ""),
+    lastSeenAt: String(row.last_seen_at || ""),
+    blocked: Number(row.blocked || 0) > 0,
+    blockReason: String(row.block_reason || ""),
+    lastSeen: {
+      ip: String(row.last_ip || ""),
+      userAgent: String(row.last_user_agent || ""),
+      deviceModel: String(row.last_device_model || ""),
+      deviceOs: String(row.last_device_os || ""),
+      app: String(row.last_app || ""),
+      device: String(row.last_device || ""),
+      acceptLanguage: String(row.last_accept_language || ""),
+    },
+  }));
+
+  const userHistory = allRows(db, `
+    SELECT short_link_id, hwid, event_type, changed_at, ip, user_agent,
+           device_model, device_os, app, device, accept_language
+    FROM short_link_user_history
+    ORDER BY changed_at ASC, id ASC
+  `).map((row) => ({
+    shortLinkId: String(row.short_link_id || ""),
+    hwid: String(row.hwid || ""),
+    eventType: String(row.event_type || "changed"),
+    changedAt: String(row.changed_at || ""),
+    ip: String(row.ip || ""),
+    userAgent: String(row.user_agent || ""),
+    deviceModel: String(row.device_model || ""),
+    deviceOs: String(row.device_os || ""),
+    app: String(row.app || ""),
+    device: String(row.device || ""),
+    acceptLanguage: String(row.accept_language || ""),
+  }));
+
+  const subscriptionOverrides = allRows(db, `
+    SELECT f.feed_key, f.sub_url, f.app, f.device, f.profile_names, f.hwid,
+           o.version, o.overrides_json, o.created_at, o.updated_at
+    FROM subscription_overrides o
+    JOIN subscription_feeds f ON f.id = o.feed_id
+    ORDER BY o.updated_at DESC, f.feed_key ASC
+  `).map((row) => ({
+    feed: {
+      feedKey: String(row.feed_key || ""),
+      subUrl: String(row.sub_url || ""),
+      app: String(row.app || ""),
+      device: String(row.device || ""),
+      profileNames: normalizeProfileNames(row.profile_names),
+      hwid: String(row.hwid || ""),
+    },
+    version: Math.max(1, Number(row.version || 1)),
+    overrides: parseJsonObjectText(row.overrides_json),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+  }));
+
+  const profileRows = allRows(db, `
+    SELECT name, owner_username, created_at, updated_at
+    FROM profile_files
+    ORDER BY name ASC
+  `);
+  const profileFiles = [];
+  if (includeProfiles) {
+    for (const row of profileRows) {
+      const name = String(row.name || "").trim();
+      if (!name || !/^[a-zA-Z0-9._-]+$/.test(name)) continue;
+      const filePath = path.join(DATA_ROOT_DIR, "profiles", `${name}.yml`);
+      let content = "";
+      try {
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          content = fs.readFileSync(filePath, "utf8");
+        }
+      } catch {
+        content = "";
+      }
+      profileFiles.push({
+        name,
+        ownerUsername: normalizeUsername(row.owner_username),
+        createdAt: String(row.created_at || ""),
+        updatedAt: String(row.updated_at || ""),
+        content,
+      });
+    }
+  }
+
+  return {
+    version: 1,
+    exportedAt: nowIso(),
+    data: {
+      users,
+      shortLinks,
+      access,
+      favorites,
+      userPolicies,
+      linkUsers,
+      userHistory,
+      subscriptionOverrides,
+      profileFiles,
+    },
+  };
+}
+
+function upsertSyncProfileFile(db, item, counters) {
+  const name = String(item?.name || "").trim();
+  if (!name || !/^[a-zA-Z0-9._-]+$/.test(name)) return;
+  const owner = normalizeUsername(item?.ownerUsername ?? item?.owner_username);
+  const createdAt = sanitizeIso(item?.createdAt ?? item?.created_at);
+  const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at, createdAt);
+  const stmt = db.prepare(`
+    INSERT INTO profile_files (name, owner_username, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(name) DO UPDATE SET
+      owner_username = excluded.owner_username,
+      updated_at = CASE
+        WHEN excluded.updated_at >= profile_files.updated_at THEN excluded.updated_at
+        ELSE profile_files.updated_at
+      END
+  `);
+  stmt.run([name, owner, createdAt, updatedAt]);
+  stmt.free();
+  counters.profileFiles += 1;
+
+  if (typeof item?.content === "string" && item.content.trim()) {
+    const dir = path.join(DATA_ROOT_DIR, "profiles");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, `${name}.yml`);
+    const tmp = `${target}.tmp`;
+    fs.writeFileSync(tmp, item.content);
+    fs.renameSync(tmp, target);
+  }
+}
+
+async function importSyncBundle(bundle, options = {}) {
+  const db = await getDb();
+  const data = bundle?.data && typeof bundle.data === "object" ? bundle.data : bundle;
+  if (!data || typeof data !== "object") throw new Error("invalid sync bundle");
+  const counters = {
+    shortLinks: 0,
+    access: 0,
+    favorites: 0,
+    userPolicies: 0,
+    linkUsers: 0,
+    userHistory: 0,
+    subscriptionOverrides: 0,
+    profileFiles: 0,
+  };
+  const dryRun = Boolean(options?.dryRun);
+  if (dryRun) return counters;
+
+  db.run("BEGIN");
+  try {
+    for (const item of Array.isArray(data.shortLinks) ? data.shortLinks : []) {
+      const id = String(item?.id || "").trim();
+      if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) continue;
+      const createdAt = sanitizeIso(item?.createdAt ?? item?.created_at);
+      const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at, createdAt);
+      const stmt = db.prepare(`
+        INSERT INTO short_links (id, params_json, title, owner_username, hidden, tags_json, created_at, updated_at, hits)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          params_json = excluded.params_json,
+          title = excluded.title,
+          owner_username = excluded.owner_username,
+          hidden = excluded.hidden,
+          tags_json = excluded.tags_json,
+          updated_at = excluded.updated_at,
+          hits = MAX(short_links.hits, excluded.hits)
+        WHERE excluded.updated_at >= short_links.updated_at
+      `);
+      stmt.run([
+        id,
+        safeJsonStringify(parseJsonObjectText(JSON.stringify(item?.params || {})), "{}"),
+        String(item?.title || "").trim(),
+        normalizeUsername(item?.ownerUsername ?? item?.owner_username),
+        item?.hidden ? 1 : 0,
+        safeJsonStringify(Array.isArray(item?.tags) ? item.tags.map((x) => String(x || "").trim()).filter(Boolean) : [], "[]"),
+        createdAt,
+        updatedAt,
+        Math.max(0, Number(item?.hits || 0)),
+      ]);
+      stmt.free();
+      counters.shortLinks += 1;
+    }
+
+    for (const item of Array.isArray(data.access) ? data.access : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      const username = normalizeUsername(item?.username);
+      if (!shortLinkId || !username) continue;
+      const createdAt = sanitizeIso(item?.createdAt ?? item?.created_at);
+      const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at, createdAt);
+      const stmt = db.prepare(`
+        INSERT INTO short_link_access (short_link_id, username, access_level, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(short_link_id, username) DO UPDATE SET
+          access_level = excluded.access_level,
+          updated_at = excluded.updated_at
+        WHERE excluded.updated_at >= short_link_access.updated_at
+      `);
+      stmt.run([shortLinkId, username, normalizeAccessLevel(item?.accessLevel ?? item?.access_level), createdAt, updatedAt]);
+      stmt.free();
+      counters.access += 1;
+    }
+
+    for (const item of Array.isArray(data.favorites) ? data.favorites : []) {
+      const accountKey = String(item?.accountKey ?? item?.account_key ?? "").trim();
+      if (!accountKey) continue;
+      const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at);
+      const list = Array.isArray(item?.favorites) ? item.favorites.filter((x) => x && typeof x === "object").slice(0, 200) : [];
+      const stmt = db.prepare(`
+        INSERT INTO favorites_store (account_key, favorites_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(account_key) DO UPDATE SET
+          favorites_json = excluded.favorites_json,
+          updated_at = excluded.updated_at
+        WHERE excluded.updated_at >= favorites_store.updated_at
+      `);
+      stmt.run([accountKey, safeJsonStringify(list, "[]"), updatedAt]);
+      stmt.free();
+      counters.favorites += 1;
+    }
+
+    for (const item of Array.isArray(data.userPolicies) ? data.userPolicies : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      if (!shortLinkId) continue;
+      const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at);
+      const stmt = db.prepare(`
+        INSERT INTO short_link_user_policy (short_link_id, max_users, blocked_message, limit_message, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(short_link_id) DO UPDATE SET
+          max_users = excluded.max_users,
+          blocked_message = excluded.blocked_message,
+          limit_message = excluded.limit_message,
+          updated_at = excluded.updated_at
+        WHERE excluded.updated_at >= short_link_user_policy.updated_at
+      `);
+      stmt.run([
+        shortLinkId,
+        Math.max(0, Number(item?.maxUsers ?? item?.max_users ?? 0)),
+        String(item?.blockedMessage ?? item?.blocked_message ?? ""),
+        String(item?.limitMessage ?? item?.limit_message ?? ""),
+        updatedAt,
+      ]);
+      stmt.free();
+      counters.userPolicies += 1;
+    }
+
+    for (const item of Array.isArray(data.linkUsers) ? data.linkUsers : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      const hwid = normalizeHwid(item?.hwid);
+      if (!shortLinkId || !hwid) continue;
+      const firstSeenAt = sanitizeIso(item?.firstSeenAt ?? item?.first_seen_at);
+      const lastSeenAt = sanitizeIso(item?.lastSeenAt ?? item?.last_seen_at, firstSeenAt);
+      const lastSeen = item?.lastSeen && typeof item.lastSeen === "object" ? item.lastSeen : item;
+      const stmt = db.prepare(`
+        INSERT INTO short_link_users (
+          short_link_id, hwid, first_seen_at, last_seen_at, blocked, block_reason,
+          last_ip, last_user_agent, last_device_model, last_device_os, last_app, last_device, last_accept_language
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(short_link_id, hwid) DO UPDATE SET
+          first_seen_at = MIN(short_link_users.first_seen_at, excluded.first_seen_at),
+          last_seen_at = excluded.last_seen_at,
+          blocked = excluded.blocked,
+          block_reason = excluded.block_reason,
+          last_ip = excluded.last_ip,
+          last_user_agent = excluded.last_user_agent,
+          last_device_model = excluded.last_device_model,
+          last_device_os = excluded.last_device_os,
+          last_app = excluded.last_app,
+          last_device = excluded.last_device,
+          last_accept_language = excluded.last_accept_language
+        WHERE excluded.last_seen_at >= short_link_users.last_seen_at
+      `);
+      stmt.run([
+        shortLinkId,
+        hwid,
+        firstSeenAt,
+        lastSeenAt,
+        item?.blocked ? 1 : 0,
+        String(item?.blockReason ?? item?.block_reason ?? "").slice(0, 500),
+        String(lastSeen?.ip || "").slice(0, 128),
+        String(lastSeen?.userAgent ?? lastSeen?.user_agent ?? "").slice(0, 512),
+        String(lastSeen?.deviceModel ?? lastSeen?.device_model ?? "").slice(0, 256),
+        String(lastSeen?.deviceOs ?? lastSeen?.device_os ?? "").slice(0, 128),
+        String(lastSeen?.app || "").slice(0, 128),
+        String(lastSeen?.device || "").slice(0, 128),
+        String(lastSeen?.acceptLanguage ?? lastSeen?.accept_language ?? "").slice(0, 128),
+      ]);
+      stmt.free();
+      counters.linkUsers += 1;
+    }
+
+    for (const item of Array.isArray(data.userHistory) ? data.userHistory : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      const hwid = normalizeHwid(item?.hwid);
+      if (!shortLinkId || !hwid) continue;
+      const changedAt = sanitizeIso(item?.changedAt ?? item?.changed_at);
+      const exists = allRows(db, `
+        SELECT id
+        FROM short_link_user_history
+        WHERE short_link_id = ? AND hwid = ? AND event_type = ? AND changed_at = ?
+        LIMIT 1
+      `, [shortLinkId, hwid, String(item?.eventType ?? item?.event_type ?? "changed"), changedAt]);
+      if (exists.length > 0) continue;
+      insertShortLinkUserHistory(db, shortLinkId, hwid, item?.eventType ?? item?.event_type ?? "changed", item, changedAt);
+      counters.userHistory += 1;
+    }
+
+    for (const item of Array.isArray(data.subscriptionOverrides) ? data.subscriptionOverrides : []) {
+      const feedInput = item?.feed && typeof item.feed === "object" ? item.feed : item;
+      const subUrl = String(feedInput?.subUrl ?? feedInput?.sub_url ?? "").trim();
+      if (!subUrl) continue;
+      const app = String(feedInput?.app || "").trim().toLowerCase();
+      const device = String(feedInput?.device || "").trim().toLowerCase();
+      const profileNames = normalizeProfileNames(feedInput?.profileNames ?? feedInput?.profile_names ?? feedInput?.profiles);
+      const hwid = normalizeHwid(feedInput?.hwid);
+      const feedKey = String(feedInput?.feedKey ?? feedInput?.feed_key ?? "").trim() || buildSubscriptionFeedKey({
+        subUrl,
+        app,
+        device,
+        profileNames,
+        hwid,
+      });
+      const feedCreatedAt = sanitizeIso(feedInput?.createdAt ?? feedInput?.created_at);
+      const feedUpdatedAt = sanitizeIso(feedInput?.updatedAt ?? feedInput?.updated_at, feedCreatedAt);
+      const feedStmt = db.prepare(`
+        INSERT INTO subscription_feeds (feed_key, sub_url, app, device, profile_names, hwid, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(feed_key) DO UPDATE SET
+          sub_url = excluded.sub_url,
+          app = excluded.app,
+          device = excluded.device,
+          profile_names = excluded.profile_names,
+          hwid = excluded.hwid,
+          updated_at = CASE
+            WHEN excluded.updated_at >= subscription_feeds.updated_at THEN excluded.updated_at
+            ELSE subscription_feeds.updated_at
+          END
+      `);
+      feedStmt.run([
+        feedKey,
+        subUrl,
+        app,
+        device,
+        profileNames.join(","),
+        hwid,
+        feedCreatedAt,
+        feedUpdatedAt,
+      ]);
+      feedStmt.free();
+      const feedRow = getSubscriptionFeedRowByKey(db, feedKey);
+      const feedId = Number(feedRow?.id || 0);
+      if (!feedId) continue;
+      const existingRows = allRows(db, `
+        SELECT updated_at
+        FROM subscription_overrides
+        WHERE feed_id = ?
+        LIMIT 1
+      `, [feedId]);
+      const existing = existingRows[0] || null;
+      const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at);
+      if (existing && existing.updated_at && updatedAt < String(existing.updated_at || "")) continue;
+      const stmt = db.prepare(`
+        INSERT INTO subscription_overrides (feed_id, version, overrides_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(feed_id) DO UPDATE SET
+          version = excluded.version,
+          overrides_json = excluded.overrides_json,
+          updated_at = excluded.updated_at
+      `);
+      stmt.run([
+        feedId,
+        Math.max(1, Number(item?.version || 1)),
+        safeJsonStringify(item?.overrides && typeof item.overrides === "object" && !Array.isArray(item.overrides) ? item.overrides : {}, "{}"),
+        sanitizeIso(item?.createdAt ?? item?.created_at, updatedAt),
+        updatedAt,
+      ]);
+      stmt.free();
+      counters.subscriptionOverrides += 1;
+    }
+
+    for (const item of Array.isArray(data.profileFiles) ? data.profileFiles : []) {
+      upsertSyncProfileFile(db, item, counters);
+    }
+
+    db.run("COMMIT");
+  } catch (e) {
+    db.run("ROLLBACK");
+    throw e;
+  }
+  saveDb(db);
+  return counters;
+}
+
 export {
   buildSubscriptionFeedKey,
   createShortLinkRow,
   getShortLinkRow,
   getShortLinkPermissions,
   listShortLinksByTagForActor,
+  listShortLinksGrantedTo,
   listShortLinkAccess,
   replaceShortLinkAccess,
   updateShortLinkRow,
@@ -1939,4 +2458,6 @@ export {
   getSubscriptionOverridesForFeed,
   upsertSubscriptionOverrides,
   pruneSubscriptionFeedSnapshots,
+  exportSyncBundle,
+  importSyncBundle,
 };

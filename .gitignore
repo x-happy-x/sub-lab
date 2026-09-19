@@ -13,6 +13,7 @@ homeserver
 deploy-direct.local.sh
 .codex
 .tmp-test-data/
-sub-mirror.zip
+.local-data/
+sub-lab.zip
 sub.json
 bypass-all.txt

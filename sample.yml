@@ -1,0 +1,939 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+unified-delay: true
+proxies:
+  -
+    name: "Самый Быстрый АВТО"
+    type: vless
+    server: test.snow-trout.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE АВТО grp-28-3-qsfg4jj9srg"
+    type: vless
+    server: test.bright-peak.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE АВТО grp-28-1-m36p7mihkf4"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE АВТО grp-28-2-0npsu7c9ke8"
+    type: vless
+    server: test.wide-cloud.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: random
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE АВТО grp-28-4-lli65vohhnc"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Германия 🇩🇪"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Швеция 🇸🇪"
+    type: vless
+    server: test.dawn-eagle.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Финляндия 🇫🇮"
+    type: vless
+    server: test.elm-forge.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇪🇪 Эстония"
+    type: vless
+    server: test.raw-maple.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇵🇱 Польша"
+    type: vless
+    server: test.bold-stone.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Россия 🇷🇺"
+    type: vless
+    server: test.iron-coral.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 🎮 Игровой 1"
+    type: vless
+    server: test.elm-forge.test-cdn-kkk.com
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇪🇪 🎮 Игровой 2"
+    type: vless
+    server: test.raw-maple.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇸🇪 🎮 Игровой 3"
+    type: vless
+    server: test.dawn-eagle.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "[FREE] ТОЛЬКО TG БОТ + САЙТ"
+    type: vless
+    server: telegram.private-networks-zk.com
+    port: 443
+    uuid: 14ffba92-6602-44ea-849f-e36dcc56259a
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: chrome
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇩🇪 Обход Резерв (только Wi-Fi)"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    network: xhttp
+    tls: true
+    servername: sun6-21.userapi.com
+    client-fingerprint: qq
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Нидерланды 🇳🇱"
+    type: vless
+    server: test.calm-peak.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Турция 🇹🇷"
+    type: vless
+    server: test.blue-robin.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tr.eu-ffast.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "США 🇺🇸"
+    type: vless
+    server: test.mint-lance.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Франция 🇫🇷"
+    type: vless
+    server: test.gold-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: par.eu-ffast.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Великобритания 🇬🇧"
+    type: vless
+    server: test.tall-otter.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: lon.eu-ffast.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "Казахстан 🇰🇿"
+    type: vless
+    server: test.soft-blade.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #1 grp-29-2-h3hdgbtpv88"
+    type: vless
+    server: test.soft-creek.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #1 grp-29-1-h5ntlvh6aks"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #1 grp-29-3-updo7rtd0eo"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #2 grp-30-3-701k6a31hfo"
+    type: vless
+    server: test.fair-field.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #2 grp-30-1-btsk0gs097"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #2 grp-30-2-ud591d6g1ss"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #3 grp-31-2-73e14ekgkjg"
+    type: vless
+    server: test.fast-blade.test-cdn-kkk.com
+    port: 10167
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #3 grp-31-1-3mbh3bdt9so"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #3 grp-31-3-vo56jdk2u48"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #4 grp-32-2-umji1asb408"
+    type: vless
+    server: test.wide-cloud.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: random
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #4 grp-32-1-bpk8icbt4f8"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #4 grp-32-3-fj8kjbhtdfc"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #5 grp-33-2-gagtrus68ng"
+    type: vless
+    server: test.soft-trail.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: random
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #5 grp-33-1-0epoi5cb95k"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #5 grp-33-3-l94bglllb0g"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #6 grp-34-2-19cn7jnlae4"
+    type: vless
+    server: test.warm-dune.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #6 grp-34-1-8tlh9no4p9c"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #6 grp-34-3-h6ko329ng"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #7 grp-35-2-d9q3fl6huq4"
+    type: vless
+    server: test.true-raven.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #7 grp-35-1-16qgq54bfk8"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #7 grp-35-3-5ng4d722jd4"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #8 grp-36-1-4d2gtid2n2"
+    type: vless
+    server: test.lynx-trail.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #8 grp-36-2-cgcfplbrcuo"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #8 grp-36-3-ugosmpmo6mc"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #9 grp-37-1-4b84ipfidns"
+    type: vless
+    server: test.fine-robin.test-cdn-kkk.com
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #9 grp-37-2-h59p5fr4uu4"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #9 grp-37-3-46mnu52ts9c"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #10 grp-38-1-8b1unl3qkg8"
+    type: vless
+    server: test.dry-moose.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #10 grp-38-2-0vu25i951tc"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #10 grp-38-3-27glladtc98"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #11 grp-41-3-6plo0pva7lc"
+    type: vless
+    server: test.rare-glen.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #11 grp-41-1-02fr8b85hq4"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #11 grp-41-2-0k0iga7vjgg"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #11 grp-41-4-de7epce8na4"
+    type: vless
+    server: test.wide-cloud.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: random
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #12 grp-42-3-2p8r0p8a9ag"
+    type: vless
+    server: test.bright-peak.test-cdn-kkk.com
+    port: 9443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #12 grp-42-1-ojsrom6dbnc"
+    type: vless
+    server: 91.240.86.161
+    port: 8443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: ads.x5.ru
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+  -
+    name: "🇫🇮 LTE #12 grp-42-2-s0mjmfv08c"
+    type: vless
+    server: test.fine-pond.test-cdn-kkk.com
+    port: 443
+    uuid: 9762b124-8c98-4c42-8b2b-83c2ff4a34c8
+    udp: true
+    tls: true
+    servername: tradingview.com
+    client-fingerprint: qq
+    flow: xtls-rprx-vision
+    reality-opts:
+      public-key: -tePObR3oZwGAUOb5kqTYkNWl6rtUKl0RFuzuu06wgw
+      short-id: 50
+proxy-groups:
+  -
+    name: AUTO
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    proxies:
+      - Самый Быстрый АВТО
+      - 🇫🇮 LTE АВТО grp-28-3-qsfg4jj9srg
+      - 🇫🇮 LTE АВТО grp-28-1-m36p7mihkf4
+      - 🇫🇮 LTE АВТО grp-28-2-0npsu7c9ke8
+      - 🇫🇮 LTE АВТО grp-28-4-lli65vohhnc
+      - Германия 🇩🇪
+      - Швеция 🇸🇪
+      - Финляндия 🇫🇮
+      - 🇪🇪 Эстония
+      - 🇵🇱 Польша
+      - Россия 🇷🇺
+      - 🇫🇮 🎮 Игровой 1
+      - 🇪🇪 🎮 Игровой 2
+      - 🇸🇪 🎮 Игровой 3
+      - [FREE] ТОЛЬКО TG БОТ + САЙТ
+      - 🇩🇪 Обход Резерв (только Wi-Fi)
+      - Нидерланды 🇳🇱
+      - Турция 🇹🇷
+      - США 🇺🇸
+      - Франция 🇫🇷
+      - Великобритания 🇬🇧
+      - Казахстан 🇰🇿
+      - 🇫🇮 LTE #1 grp-29-2-h3hdgbtpv88
+      - 🇫🇮 LTE #1 grp-29-1-h5ntlvh6aks
+      - 🇫🇮 LTE #1 grp-29-3-updo7rtd0eo
+      - 🇫🇮 LTE #2 grp-30-3-701k6a31hfo
+      - 🇫🇮 LTE #2 grp-30-1-btsk0gs097
+      - 🇫🇮 LTE #2 grp-30-2-ud591d6g1ss
+      - 🇫🇮 LTE #3 grp-31-2-73e14ekgkjg
+      - 🇫🇮 LTE #3 grp-31-1-3mbh3bdt9so
+      - 🇫🇮 LTE #3 grp-31-3-vo56jdk2u48
+      - 🇫🇮 LTE #4 grp-32-2-umji1asb408
+      - 🇫🇮 LTE #4 grp-32-1-bpk8icbt4f8
+      - 🇫🇮 LTE #4 grp-32-3-fj8kjbhtdfc
+      - 🇫🇮 LTE #5 grp-33-2-gagtrus68ng
+      - 🇫🇮 LTE #5 grp-33-1-0epoi5cb95k
+      - 🇫🇮 LTE #5 grp-33-3-l94bglllb0g
+      - 🇫🇮 LTE #6 grp-34-2-19cn7jnlae4
+      - 🇫🇮 LTE #6 grp-34-1-8tlh9no4p9c
+      - 🇫🇮 LTE #6 grp-34-3-h6ko329ng
+      - 🇫🇮 LTE #7 grp-35-2-d9q3fl6huq4
+      - 🇫🇮 LTE #7 grp-35-1-16qgq54bfk8
+      - 🇫🇮 LTE #7 grp-35-3-5ng4d722jd4
+      - 🇫🇮 LTE #8 grp-36-1-4d2gtid2n2
+      - 🇫🇮 LTE #8 grp-36-2-cgcfplbrcuo
+      - 🇫🇮 LTE #8 grp-36-3-ugosmpmo6mc
+      - 🇫🇮 LTE #9 grp-37-1-4b84ipfidns
+      - 🇫🇮 LTE #9 grp-37-2-h59p5fr4uu4
+      - 🇫🇮 LTE #9 grp-37-3-46mnu52ts9c
+      - 🇫🇮 LTE #10 grp-38-1-8b1unl3qkg8
+      - 🇫🇮 LTE #10 grp-38-2-0vu25i951tc
+      - 🇫🇮 LTE #10 grp-38-3-27glladtc98
+      - 🇫🇮 LTE #11 grp-41-3-6plo0pva7lc
+      - 🇫🇮 LTE #11 grp-41-1-02fr8b85hq4
+      - 🇫🇮 LTE #11 grp-41-2-0k0iga7vjgg
+      - 🇫🇮 LTE #11 grp-41-4-de7epce8na4
+      - 🇫🇮 LTE #12 grp-42-3-2p8r0p8a9ag
+      - 🇫🇮 LTE #12 grp-42-1-ojsrom6dbnc
+      - 🇫🇮 LTE #12 grp-42-2-s0mjmfv08c
+  -
+    name: PROXY
+    type: select
+    proxies:
+      - AUTO
+      - DIRECT
+      - Самый Быстрый АВТО
+      - 🇫🇮 LTE АВТО grp-28-3-qsfg4jj9srg
+      - 🇫🇮 LTE АВТО grp-28-1-m36p7mihkf4
+      - 🇫🇮 LTE АВТО grp-28-2-0npsu7c9ke8
+      - 🇫🇮 LTE АВТО grp-28-4-lli65vohhnc
+      - Германия 🇩🇪
+      - Швеция 🇸🇪
+      - Финляндия 🇫🇮
+      - 🇪🇪 Эстония
+      - 🇵🇱 Польша
+      - Россия 🇷🇺
+      - 🇫🇮 🎮 Игровой 1
+      - 🇪🇪 🎮 Игровой 2
+      - 🇸🇪 🎮 Игровой 3
+      - [FREE] ТОЛЬКО TG БОТ + САЙТ
+      - 🇩🇪 Обход Резерв (только Wi-Fi)
+      - Нидерланды 🇳🇱
+      - Турция 🇹🇷
+      - США 🇺🇸
+      - Франция 🇫🇷
+      - Великобритания 🇬🇧
+      - Казахстан 🇰🇿
+      - 🇫🇮 LTE #1 grp-29-2-h3hdgbtpv88
+      - 🇫🇮 LTE #1 grp-29-1-h5ntlvh6aks
+      - 🇫🇮 LTE #1 grp-29-3-updo7rtd0eo
+      - 🇫🇮 LTE #2 grp-30-3-701k6a31hfo
+      - 🇫🇮 LTE #2 grp-30-1-btsk0gs097
+      - 🇫🇮 LTE #2 grp-30-2-ud591d6g1ss
+      - 🇫🇮 LTE #3 grp-31-2-73e14ekgkjg
+      - 🇫🇮 LTE #3 grp-31-1-3mbh3bdt9so
+      - 🇫🇮 LTE #3 grp-31-3-vo56jdk2u48
+      - 🇫🇮 LTE #4 grp-32-2-umji1asb408
+      - 🇫🇮 LTE #4 grp-32-1-bpk8icbt4f8
+      - 🇫🇮 LTE #4 grp-32-3-fj8kjbhtdfc
+      - 🇫🇮 LTE #5 grp-33-2-gagtrus68ng
+      - 🇫🇮 LTE #5 grp-33-1-0epoi5cb95k
+      - 🇫🇮 LTE #5 grp-33-3-l94bglllb0g
+      - 🇫🇮 LTE #6 grp-34-2-19cn7jnlae4
+      - 🇫🇮 LTE #6 grp-34-1-8tlh9no4p9c
+      - 🇫🇮 LTE #6 grp-34-3-h6ko329ng
+      - 🇫🇮 LTE #7 grp-35-2-d9q3fl6huq4
+      - 🇫🇮 LTE #7 grp-35-1-16qgq54bfk8
+      - 🇫🇮 LTE #7 grp-35-3-5ng4d722jd4
+      - 🇫🇮 LTE #8 grp-36-1-4d2gtid2n2
+      - 🇫🇮 LTE #8 grp-36-2-cgcfplbrcuo
+      - 🇫🇮 LTE #8 grp-36-3-ugosmpmo6mc
+      - 🇫🇮 LTE #9 grp-37-1-4b84ipfidns
+      - 🇫🇮 LTE #9 grp-37-2-h59p5fr4uu4
+      - 🇫🇮 LTE #9 grp-37-3-46mnu52ts9c
+      - 🇫🇮 LTE #10 grp-38-1-8b1unl3qkg8
+      - 🇫🇮 LTE #10 grp-38-2-0vu25i951tc
+      - 🇫🇮 LTE #10 grp-38-3-27glladtc98
+      - 🇫🇮 LTE #11 grp-41-3-6plo0pva7lc
+      - 🇫🇮 LTE #11 grp-41-1-02fr8b85hq4
+      - 🇫🇮 LTE #11 grp-41-2-0k0iga7vjgg
+      - 🇫🇮 LTE #11 grp-41-4-de7epce8na4
+      - 🇫🇮 LTE #12 grp-42-3-2p8r0p8a9ag
+      - 🇫🇮 LTE #12 grp-42-1-ojsrom6dbnc
+      - 🇫🇮 LTE #12 grp-42-2-s0mjmfv08c
+rules:
+  - MATCH,PROXY

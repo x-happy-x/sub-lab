@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import { DATA_DIR } from "./config.js";
 import crypto from "node:crypto";
 
-const LOCAL_SOURCES_DIR = "/data/local-sources";
+const LOCAL_SOURCES_DIR = path.join(DATA_DIR, "local-sources");
 
 function ensureLocalSourcesDir() {
   if (!fs.existsSync(LOCAL_SOURCES_DIR)) {

@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import path from "node:path";
+import { DATA_DIR } from "./config.js";
 import crypto from "node:crypto";
 
-const STORE_PATH = "/data/mock-sources.json";
+const STORE_PATH = path.join(DATA_DIR, "mock-sources.json");
 const MAX_LOGS = 200;
 
 const PRESETS = {
@@ -39,8 +41,8 @@ const PRESETS = {
 };
 
 function ensureStoreDir() {
-  if (!fs.existsSync("/data")) {
-    fs.mkdirSync("/data", { recursive: true });
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
   }
 }
 

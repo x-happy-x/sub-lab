@@ -1,13 +1,14 @@
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  AUTH_SESSION_TTL_SEC,
   CACHE_DIR,
   PORT,
   PUBLIC_BASE_URL,
+  SYNC_API_TOKEN,
   STATIC_FILES,
   normalizeOutput,
 } from "./config.js";
@@ -23,18 +24,11 @@ import {
   buildQueryFromParams,
 } from "./short-links.js";
 import {
-  createAuthSessionForUser,
-  getAuthSession,
-  deleteAuthSession,
   incrementShortLinkHits,
   getShortLinkPermissions,
   listShortLinksByTagForActor,
-  hasUsers,
-  verifyUserCredentials,
-  listUsers as listAuthUsers,
-  createUser as createAuthUser,
-  updateUser as updateAuthUser,
-  deleteUser as deleteAuthUser,
+  getShortLinkRow,
+  listShortLinksGrantedTo,
   getFavoritesRow,
   listShortLinkAccess,
   replaceShortLinkAccess,
@@ -49,6 +43,8 @@ import {
   getSubscriptionOverridesForFeed,
   upsertSubscriptionFeed,
   upsertSubscriptionOverrides,
+  exportSyncBundle,
+  importSyncBundle,
 } from "./sqlite-store.js";
 import {
   createMockSource,
@@ -95,6 +91,31 @@ import { getAppsCatalog, getAppGuide } from "./apps-catalog.js";
 import { parseBulkProxyText } from "./proxy-import.js";
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
+// Ключ приложения в account: так называются группы в LLDAP (`sub_mirror_admin`
+// и прочие), поэтому переименование сервиса его не касается.
+const ACCOUNT_APP = "sub_mirror";
+const ACCOUNT_URL = String(process.env.ACCOUNT_URL || "http://account:4160").replace(/\/+$/, "");
+const ACCOUNT_SERVICE_TOKEN = String(process.env.ACCOUNT_SERVICE_TOKEN || "");
+/**
+ * Cookie сессии в браузере.
+ *
+ * Имя обязано быть своим у каждого приложения: cookie не разделяются по
+ * портам, а все домашние сервисы живут на одном хосте. С общим именем вход в
+ * соседнее приложение молча подменял сессию здесь — и в интерфейсе появлялся
+ * чужой пользователь с его ролью.
+ */
+const SESSION_COOKIE = String(process.env.SESSION_COOKIE || "sub_lab_session").trim() || "sub_lab_session";
+/** Имя cookie, которое ждёт внутренний API account. Оно общее для всех приложений. */
+const ACCOUNT_SESSION_COOKIE = String(process.env.ACCOUNT_SESSION_COOKIE || "kartoteka_session").trim()
+  || "kartoteka_session";
+/** Cookie прежней общей сессии: гасим её, чтобы она не всплывала из другого приложения. */
+const LEGACY_SESSION_COOKIES = ["kartoteka_session"].filter((name) => name !== SESSION_COOKIE);
+const AUTH_STATE_COOKIE = "sub_lab_auth_state";
+const ACCOUNT_HOST_PREFIX = String(process.env.ACCOUNT_HOST_PREFIX || "account").trim().toLowerCase() || "account";
+const SUB_LAB_HOST_PREFIX = String(process.env.SUB_LAB_HOST_PREFIX || process.env.SUB_MIRROR_HOST_PREFIX || "sub").trim().toLowerCase() || "sub";
+const ACCOUNT_LOCAL_PORT = Number(process.env.ACCOUNT_LOCAL_PORT || 4161);
+const SUB_LAB_LOCAL_PORT = Number(process.env.SUB_LAB_LOCAL_PORT || process.env.SUB_MIRROR_LOCAL_PORT || 4192);
+const PROXY_HOST = String(process.env.PROXY_HOST || "").trim().toLowerCase();
 const FRONTEND_DIST_CANDIDATES = [
   path.resolve(SERVER_DIR, "../frontend-dist"),
   path.resolve(SERVER_DIR, "../frontend/dist"),
@@ -182,42 +203,296 @@ function parseBearerToken(req) {
   return m ? m[1].trim() : "";
 }
 
+function redirect(res, location, extraHeaders = {}) {
+  res.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store",
+    ...extraHeaders,
+  });
+  res.end();
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function sendAuthProblem(res, status, title, message, extraHeaders = {}) {
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...extraHeaders,
+  });
+  res.end(`<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;line-height:1.5">
+  <h1>${escapeHtml(title)}</h1>
+  <p>${escapeHtml(message)}</p>
+  <p><a href="/auth/start?return=/">Попробовать войти снова</a></p>
+</body>
+</html>`);
+}
+
+function cookieValue(name, value, { maxAge, expires, httpOnly = true } = {}) {
+  const parts = [`${name}=${encodeURIComponent(String(value || ""))}`, "Path=/", "SameSite=Lax"];
+  if (httpOnly) parts.push("HttpOnly");
+  if (Number.isFinite(maxAge)) parts.push(`Max-Age=${Math.max(0, Math.floor(maxAge))}`);
+  if (expires) parts.push(`Expires=${expires instanceof Date ? expires.toUTCString() : String(expires)}`);
+  return parts.join("; ");
+}
+
+function clearCookieValue(name) {
+  return cookieValue(name, "", { maxAge: 0 });
+}
+
+/** Своя cookie плюс общая старая: иначе вход в соседнее приложение вернёт чужую сессию. */
+function clearSessionCookies() {
+  return [SESSION_COOKIE, ...LEGACY_SESSION_COOKIES].map(clearCookieValue);
+}
+
+function firstHeader(value) {
+  return String(Array.isArray(value) ? value[0] : value || "").split(",")[0].trim();
+}
+
+function splitHost(host) {
+  const match = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(String(host || ""));
+  return { hostname: (match?.[1] || "").toLowerCase(), port: match?.[2] || "" };
+}
+
+function isAddressHost(hostname) {
+  return hostname.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || !hostname.includes(".");
+}
+
+function defaultPort(proto, port) {
+  return (proto === "https" && port === "443") || (proto === "http" && port === "80");
+}
+
+function browserOf(req) {
+  const forwardedHost = firstHeader(req.headers["x-forwarded-host"]);
+  const incomingHost = firstHeader(req.headers.host).toLowerCase();
+  const mapped = !forwardedHost && PUBLIC_BASE_URL && incomingHost === PROXY_HOST;
+  const publicUrl = mapped ? new URL(PUBLIC_BASE_URL) : null;
+  const rawHost = (publicUrl?.host || forwardedHost || incomingHost || `127.0.0.1:${SUB_LAB_LOCAL_PORT}`).toLowerCase();
+  let { hostname, port } = splitHost(rawHost);
+  const address = isAddressHost(hostname);
+  let proto = publicUrl?.protocol.slice(0, -1) || firstHeader(req.headers["x-forwarded-proto"]).toLowerCase();
+  if (proto !== "http" && proto !== "https") {
+    const direct = address || /\.(local|lan|home\.arpa)$/.test(hostname) || [ACCOUNT_LOCAL_PORT, SUB_LAB_LOCAL_PORT].includes(Number(port));
+    proto = direct ? "http" : "https";
+  }
+  const forwardedPort = firstHeader(req.headers["x-forwarded-port"]);
+  if (!port && forwardedHost && /^\d+$/.test(forwardedPort)) port = forwardedPort;
+  if (defaultPort(proto, port)) port = "";
+  const host = port ? `${hostname}:${port}` : hostname;
+  return { hostname, port, proto, address, host, origin: `${proto}://${host}` };
+}
+
+function appOrigin(req, app) {
+  const b = browserOf(req);
+  const ports = { account: ACCOUNT_LOCAL_PORT, sub_mirror: SUB_LAB_LOCAL_PORT };
+  const prefixes = { account: ACCOUNT_HOST_PREFIX, sub_mirror: SUB_LAB_HOST_PREFIX };
+  if (b.address) return `http://${b.hostname}:${ports[app]}`;
+  const labels = b.hostname.split(".");
+  const rest = Object.values(prefixes).includes(labels[0]) ? labels.slice(1) : labels;
+  const hostname = [prefixes[app], ...rest].join(".");
+  const knownPort = [ACCOUNT_LOCAL_PORT, SUB_LAB_LOCAL_PORT].includes(Number(b.port));
+  const port = !b.port ? "" : knownPort ? String(ports[app]) : b.port;
+  return `${b.proto}://${hostname}${port ? `:${port}` : ""}`;
+}
+
+function selfOrigin(req) {
+  return appOrigin(req, ACCOUNT_APP);
+}
+
+function accountBrowserOrigin(req) {
+  return appOrigin(req, "account");
+}
+
+function safeReturnPath(raw) {
+  const text = String(raw || "/");
+  return /^\/(?![/\\])/.test(text) ? text : "/";
+}
+
+function authStartLocation(req, returnPath = "/") {
+  const state = crypto.randomBytes(24).toString("base64url");
+  const accountUrl = new URL("/authorize", accountBrowserOrigin(req));
+  accountUrl.searchParams.set("app", ACCOUNT_APP);
+  accountUrl.searchParams.set("redirect_uri", `${selfOrigin(req)}/auth/callback`);
+  accountUrl.searchParams.set("state", state);
+  const payload = `${state}:${Buffer.from(safeReturnPath(returnPath)).toString("base64url")}`;
+  return {
+    location: accountUrl.href,
+    cookie: cookieValue(AUTH_STATE_COOKIE, payload, { maxAge: 5 * 60 }),
+  };
+}
+
+function accountLogoutLocation(req) {
+  const url = new URL("/logout", accountBrowserOrigin(req));
+  url.searchParams.set("return", `${selfOrigin(req)}/`);
+  return url.href;
+}
+
+async function accountRequest(pathname, { method = "GET", token = "", body, service = false } = {}) {
+  const headers = { Accept: "application/json" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (token) headers.Cookie = `${ACCOUNT_SESSION_COOKIE}=${encodeURIComponent(token)}`;
+  if (service) headers["X-Service-Token"] = ACCOUNT_SERVICE_TOKEN;
+  const payload = body === undefined ? "" : JSON.stringify(body);
+  if (payload) headers["Content-Length"] = Buffer.byteLength(payload);
+  const url = new URL(pathname, `${ACCOUNT_URL}/`);
+  const transport = url.protocol === "https:" ? https : http;
+  const { statusCode, text } = await new Promise((resolve, reject) => {
+    const request = transport.request(
+      url,
+      {
+        method,
+        headers,
+        timeout: 8000,
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => resolve({
+          statusCode: Number(response.statusCode || 0),
+          text: Buffer.concat(chunks).toString("utf8"),
+        }));
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("account request timeout")));
+    request.on("error", reject);
+    if (payload) request.write(payload);
+    request.end();
+  });
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = {};
+  }
+  if (statusCode < 200 || statusCode >= 300) {
+    const message = json.error || json.message || `account request failed (${statusCode})`;
+    const error = new Error(message);
+    error.status = statusCode;
+    throw error;
+  }
+  return json;
+}
+
+async function accountMe(token) {
+  if (!token) return null;
+  try {
+    const json = await accountRequest("/api/auth/me", { token });
+    return json.user || null;
+  } catch {
+    return null;
+  }
+}
+
+function accountRole(user) {
+  return String(user?.access?.[ACCOUNT_APP]?.role || "none").toLowerCase();
+}
+
+function authUserFromAccount(user) {
+  const role = accountRole(user);
+  const username = String(user?.login || "").trim().toLowerCase();
+  if (!username || role === "none") return null;
+  return {
+    username,
+    name: String(user?.name || ""),
+    role: role === "admin" ? "admin" : "user",
+    accountRole: role,
+    canEdit: role === "editor" || role === "admin",
+  };
+}
+
+function accountUserForUi(user) {
+  const mapped = authUserFromAccount(user);
+  if (!mapped) return null;
+  return {
+    username: mapped.username,
+    name: mapped.name,
+    role: mapped.role,
+    accountRole: mapped.accountRole,
+  };
+}
+
+function fixedTimeEqual(a, b) {
+  const left = Buffer.from(String(a || ""));
+  const right = Buffer.from(String(b || ""));
+  if (left.length !== right.length || left.length === 0) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function resolveSyncToken(req) {
+  return String(req.headers["x-sync-token"] || "").trim() || parseBearerToken(req);
+}
+
+function isSyncTokenValid(req) {
+  return Boolean(SYNC_API_TOKEN) && fixedTimeEqual(resolveSyncToken(req), SYNC_API_TOKEN);
+}
+
+function requireSyncToken(req, res) {
+  if (!SYNC_API_TOKEN) {
+    sendJson(res, 503, { ok: false, error: "sync API is disabled" });
+    return false;
+  }
+  if (!isSyncTokenValid(req)) {
+    sendJson(res, 401, { ok: false, error: "invalid sync token" });
+    return false;
+  }
+  return true;
+}
+
+async function requireAdminOrSyncToken(req, res) {
+  if (isSyncTokenValid(req)) return true;
+  const state = await requireAdmin(req, res);
+  return Boolean(state);
+}
+
 async function resolveAuthToken(req) {
-  const cookieToken = parseCookies(req).sub_auth || "";
+  const cookieToken = parseCookies(req)[SESSION_COOKIE] || "";
   const headerToken = String(req.headers["x-auth-token"] || "").trim();
   const bearerToken = parseBearerToken(req);
   return cookieToken || headerToken || bearerToken;
 }
 
 async function getAuthState(req) {
-  const enabled = await hasUsers();
-  if (!enabled) return { enabled: false, authenticated: true, token: "" };
   const token = await resolveAuthToken(req);
-  if (!token) return { enabled: true, authenticated: false, token: "" };
-  const session = await getAuthSession(token);
+  if (!token) return { enabled: true, authenticated: false, token: "", user: null };
+  const accountUser = await accountMe(token);
+  const user = authUserFromAccount(accountUser);
   return {
     enabled: true,
-    authenticated: Boolean(session),
+    authenticated: Boolean(user),
+    denied: Boolean(accountUser && !user),
     token,
-    user: session
-      ? {
-          username: String(session.username || ""),
-          role: String(session.role || "user"),
-        }
-      : null,
+    accountUser,
+    user,
   };
 }
 
 async function requireApiAuth(req, res) {
   const state = await getAuthState(req);
-  if (!state.enabled || state.authenticated) return true;
+  if (state.authenticated) return true;
+  if (state.denied) {
+    sendJson(res, 403, { ok: false, error: "forbidden", accessRequired: true });
+    return false;
+  }
   sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
   return false;
 }
 
 async function requireAdmin(req, res) {
   const state = await getAuthState(req);
-  if (!state.enabled || !state.authenticated) {
+  if (!state.authenticated) {
+    if (state.denied) {
+      sendJson(res, 403, { ok: false, error: "forbidden", accessRequired: true });
+      return null;
+    }
     sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
     return null;
   }
@@ -228,8 +503,24 @@ async function requireAdmin(req, res) {
   return state;
 }
 
+async function requireEditorAuth(req, res) {
+  const state = await getAuthState(req);
+  if (!state.authenticated) {
+    if (state.denied) {
+      sendJson(res, 403, { ok: false, error: "forbidden", accessRequired: true });
+      return null;
+    }
+    sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
+    return null;
+  }
+  if (!state.user?.canEdit) {
+    sendJson(res, 403, { ok: false, error: "forbidden", editorRequired: true });
+    return null;
+  }
+  return state;
+}
+
 function authActorFromState(state) {
-  if (!state?.enabled) return null;
   if (!state?.authenticated || !state?.user) return { username: "", role: "user" };
   return {
     username: String(state.user.username || ""),
@@ -249,6 +540,10 @@ function canAccessMockSource(source, actor) {
 async function requireShortLinkPermission(req, res, id, mode = "view") {
   const state = await getAuthState(req);
   if (state.enabled && !state.authenticated) {
+    if (state.denied) {
+      sendJson(res, 403, { ok: false, error: "forbidden", accessRequired: true });
+      return null;
+    }
     sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
     return null;
   }
@@ -259,6 +554,10 @@ async function requireShortLinkPermission(req, res, id, mode = "view") {
   }
   if (mode === "manage" && !permission.canManageAccess) {
     sendJson(res, 403, { ok: false, error: "forbidden" });
+    return null;
+  }
+  if ((mode === "manage" || mode === "edit") && state.enabled && !state.user?.canEdit) {
+    sendJson(res, 403, { ok: false, error: "forbidden", editorRequired: true });
     return null;
   }
   if (mode === "edit" && !permission.canEdit) {
@@ -1580,134 +1879,128 @@ async function handleProfileEditorDelete(req, reqUrl, res) {
 
 async function handleAuthMe(req, res) {
   const state = await getAuthState(req);
+  const start = authStartLocation(req, "/");
   sendJson(res, 200, {
     ok: true,
     config: {
       publicBaseUrl: resolvePublicOrigin(req),
+      accountUrl: accountBrowserOrigin(req),
+      loginUrl: start.location,
+      logoutUrl: accountLogoutLocation(req),
     },
     auth: {
       enabled: state.enabled,
       authenticated: state.authenticated,
+      denied: Boolean(state.denied),
       user: state.user || null,
     },
   });
 }
 
 async function handleAuthLogin(req, res) {
-  const enabled = await hasUsers();
-  if (!enabled) {
-    sendJson(res, 200, { ok: true, auth: { enabled: false, authenticated: true, user: null } });
-    return;
-  }
-  try {
-    const body = await readJsonBody(req);
-    const username = String(body.username || "").trim().toLowerCase();
-    const password = String(body.password || "");
-    if (!username || !password) {
-      sendJson(res, 401, { ok: false, error: "invalid credentials", authRequired: true });
-      return;
-    }
-    const user = await verifyUserCredentials(username, password);
-    if (!user) {
-      sendJson(res, 401, { ok: false, error: "invalid credentials", authRequired: true });
-      return;
-    }
-    const session = await createAuthSessionForUser(user.username, AUTH_SESSION_TTL_SEC);
-    const maxAge = Math.max(60, Number(AUTH_SESSION_TTL_SEC || 0));
-    sendJson(
-      res,
-      200,
-      {
-        ok: true,
-        auth: {
-          enabled: true,
-          authenticated: true,
-          user: {
-            username: user.username,
-            role: user.role,
-          },
-        },
-      },
-      { "Set-Cookie": `sub_auth=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` },
-    );
-  } catch (e) {
-    sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
-  }
+  const body = await readJsonBody(req).catch(() => ({}));
+  const start = authStartLocation(req, body?.return || "/");
+  sendJson(res, 200, { ok: true, redirect: start.location }, { "Set-Cookie": start.cookie });
 }
 
 async function handleAuthLogout(req, res) {
-  const token = await resolveAuthToken(req);
-  if (token) await deleteAuthSession(token);
-  const enabled = await hasUsers();
   sendJson(
     res,
     200,
-    { ok: true, auth: { enabled, authenticated: false, user: null } },
-    { "Set-Cookie": "sub_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" },
+    { ok: true, redirect: accountLogoutLocation(req), auth: { enabled: true, authenticated: false, user: null } },
+    { "Set-Cookie": clearSessionCookies() },
   );
+}
+
+async function handleAuthStart(req, reqUrl, res) {
+  const start = authStartLocation(req, reqUrl.searchParams.get("return") || "/");
+  redirect(res, start.location, { "Set-Cookie": [start.cookie, ...clearSessionCookies()] });
+}
+
+async function handleAuthCallback(req, reqUrl, res) {
+  const code = String(reqUrl.searchParams.get("code") || "");
+  const state = String(reqUrl.searchParams.get("state") || "");
+  const cookie = String(parseCookies(req)[AUTH_STATE_COOKIE] || "");
+  const [expectedState, returnEncoded = ""] = cookie.split(":");
+  if (!code || !state || state !== expectedState) {
+    sendAuthProblem(res, 400, "Вход не завершён", "Account вернул недействительный state. Начните вход заново.", {
+      "Set-Cookie": [clearCookieValue(AUTH_STATE_COOKIE), ...clearSessionCookies()],
+    });
+    return;
+  }
+  let returnPath = "/";
+  try {
+    returnPath = safeReturnPath(Buffer.from(returnEncoded, "base64url").toString("utf8"));
+  } catch {
+    returnPath = "/";
+  }
+  try {
+    const json = await accountRequest("/api/service/exchange", {
+      method: "POST",
+      service: true,
+      body: {
+        app: ACCOUNT_APP,
+        code,
+        redirectUri: `${selfOrigin(req)}/auth/callback`,
+      },
+    });
+    const accountUser = await accountMe(json.token || "");
+    const appUser = authUserFromAccount(accountUser);
+    if (!appUser) {
+      const login = accountUser?.login ? ` для ${accountUser.login}` : "";
+      sendAuthProblem(res, 403, "Нет доступа к Sub Lab", `В account не назначена роль sub_mirror${login}.`, {
+        "Set-Cookie": [clearCookieValue(AUTH_STATE_COOKIE), ...clearSessionCookies()],
+      });
+      return;
+    }
+    const expires = json.expires ? new Date(json.expires) : undefined;
+    redirect(res, returnPath, {
+      "Set-Cookie": [
+        cookieValue(SESSION_COOKIE, json.token || "", { expires }),
+        ...LEGACY_SESSION_COOKIES.map(clearCookieValue),
+        clearCookieValue(AUTH_STATE_COOKIE),
+      ],
+    });
+  } catch (e) {
+    console.warn(`account callback failed: ${e?.message || e}`);
+    sendAuthProblem(res, 502, "Account не подтвердил вход", e?.message || "Не удалось обменять код входа на сессию.", {
+      "Set-Cookie": [clearCookieValue(AUTH_STATE_COOKIE), ...clearSessionCookies()],
+    });
+  }
 }
 
 async function handleAdminUsersList(req, res) {
   const state = await requireAdmin(req, res);
   if (!state) return;
-  const users = await listAuthUsers();
-  sendJson(res, 200, { ok: true, users });
+  try {
+    const json = await accountRequest("/api/users", { token: state.token });
+    const users = (Array.isArray(json.users) ? json.users : [])
+      .map(accountUserForUi)
+      .filter(Boolean);
+    sendJson(res, 200, { ok: true, users, source: "account" });
+  } catch (e) {
+    sendJson(res, e?.status || 502, { ok: false, error: e?.message || "account users unavailable" });
+  }
 }
 
 async function handleAdminUsersCreate(req, res) {
   const state = await requireAdmin(req, res);
   if (!state) return;
-  try {
-    const body = await readJsonBody(req);
-    const user = await createAuthUser({
-      username: body.username,
-      password: body.password,
-      role: body.role,
-    });
-    sendJson(res, 201, { ok: true, user });
-  } catch (e) {
-    sendJson(res, 400, { ok: false, error: e?.message || "unable to create user" });
-  }
+  sendJson(res, 410, { ok: false, error: "users and roles are managed in account" });
 }
 
 async function handleAdminUsersUpdate(req, res, username) {
   const state = await requireAdmin(req, res);
   if (!state) return;
-  try {
-    const body = await readJsonBody(req);
-    const login = String(username || "").trim().toLowerCase();
-    if (state.user?.username === login && body?.role !== undefined) {
-      sendJson(res, 400, { ok: false, error: "cannot change current admin role" });
-      return;
-    }
-    const user = await updateAuthUser(username, {
-      role: body.role,
-      password: body.password,
-    });
-    if (!user) {
-      sendJson(res, 404, { ok: false, error: "user not found" });
-      return;
-    }
-    sendJson(res, 200, { ok: true, user });
-  } catch (e) {
-    sendJson(res, 400, { ok: false, error: e?.message || "unable to update user" });
-  }
+  void username;
+  sendJson(res, 410, { ok: false, error: "users and roles are managed in account" });
 }
 
 async function handleAdminUsersDelete(req, res, username) {
   const state = await requireAdmin(req, res);
   if (!state) return;
-  const login = String(username || "").trim().toLowerCase();
-  if (state.user?.username === login) {
-    sendJson(res, 400, { ok: false, error: "cannot delete current admin user" });
-    return;
-  }
-  const ok = await deleteAuthUser(login);
-  if (!ok) {
-    sendJson(res, 404, { ok: false, error: "user not found" });
-    return;
-  }
-  sendJson(res, 200, { ok: true });
+  void username;
+  sendJson(res, 410, { ok: false, error: "users and roles are managed in account" });
 }
 
 async function handleSearchByTag(req, reqUrl, res) {
@@ -1777,6 +2070,28 @@ async function handlePutShortLinkAccess(req, res, id) {
   }
 }
 
+/** Права на запись избранного: своя строка списка, чужая короткая ссылка или потерянная. */
+function favoritePermissions(permission) {
+  if (!permission) {
+    // Короткой ссылки больше нет: это всё ещё запись владельца списка, поэтому
+    // она остаётся видимой и редактируемой — сохранение создаст ссылку заново.
+    return { canView: true, canEdit: true, canManageAccess: false, accessLevel: "edit", missing: true };
+  }
+  return {
+    canView: permission.canView,
+    canEdit: permission.canEdit,
+    canManageAccess: permission.canManageAccess,
+    accessLevel: permission.accessLevel || "",
+  };
+}
+
+/**
+ * Отсев записей, к которым у пользователя нет доступа.
+ *
+ * Пропавшая короткая ссылка — не потеря доступа: раньше такие записи молча
+ * исчезали, и восстановление резервной копии на чистой базе давало пустой
+ * список. Теперь исчезает только то, что закрыл владелец.
+ */
 async function filterFavoritesByAccess(list, actor) {
   const input = Array.isArray(list) ? list : [];
   const output = [];
@@ -1791,19 +2106,51 @@ async function filterFavoritesByAccess(list, actor) {
       continue;
     }
     const permission = await getShortLinkPermissions(shortId, actor);
-    if (permission?.canView) {
-      output.push({
-        ...item,
-        permissions: {
-          canView: permission.canView,
-          canEdit: permission.canEdit,
-          canManageAccess: permission.canManageAccess,
-          accessLevel: permission.accessLevel || "",
-        },
-      });
-    }
+    if (permission && !permission.canView) continue;
+    output.push({ ...item, permissions: favoritePermissions(permission) });
   }
   return output;
+}
+
+/**
+ * Подписки, выданные пользователю через доступ к короткой ссылке.
+ *
+ * Они не хранятся в его списке — иначе наблюдатель, который ничего не создаёт,
+ * видел бы пустой кабинет. Список собирается на каждый запрос и помечается
+ * `derived`, чтобы сохранение его не записывало.
+ */
+async function grantedFavorites(req, actor, existing) {
+  const username = String(actor?.username || "").trim().toLowerCase();
+  if (!username) return [];
+  const known = new Set(
+    (Array.isArray(existing) ? existing : [])
+      .map((item) => String(item?.shortId || "").trim())
+      .filter(Boolean),
+  );
+  const rows = await listShortLinksGrantedTo(username);
+  const out = [];
+  for (const row of rows) {
+    if (known.has(row.link.id)) continue;
+    const urls = shortLinkPublicUrls(req, row.link.id, row.link.params || {});
+    out.push({
+      title: row.link.title || row.link.id,
+      url: urls.shortUrl,
+      shortId: row.link.id,
+      hidden: Boolean(row.link.hidden),
+      tags: Array.isArray(row.link.tags) ? row.link.tags : [],
+      payload: row.link.params || {},
+      labels: [],
+      ts: Date.parse(row.link.updatedAt || row.link.createdAt || "") || 0,
+      derived: true,
+      permissions: {
+        canView: true,
+        canEdit: row.accessLevel === "edit",
+        canManageAccess: false,
+        accessLevel: row.accessLevel || "view",
+      },
+    });
+  }
+  return out;
 }
 
 async function resolveFavoritesAccountKey(req) {
@@ -1819,8 +2166,10 @@ async function handleFavoritesGet(req, res) {
     return;
   }
   const state = await getAuthState(req);
-  const favorites = await filterFavoritesByAccess(await getFavoritesRow(key), authActorFromState(state));
-  sendJson(res, 200, { ok: true, favorites });
+  const actor = authActorFromState(state);
+  const own = await filterFavoritesByAccess(await getFavoritesRow(key), actor);
+  const shared = await grantedFavorites(req, actor, own);
+  sendJson(res, 200, { ok: true, favorites: [...own, ...shared] });
 }
 
 async function handleFavoritesPut(req, res) {
@@ -1832,11 +2181,151 @@ async function handleFavoritesPut(req, res) {
   try {
     const state = await getAuthState(req);
     const body = await readJsonBody(req, 2 * 1024 * 1024);
-    const favorites = Array.isArray(body?.favorites) ? body.favorites : [];
-    const saved = await setFavoritesRow(key, await filterFavoritesByAccess(favorites, authActorFromState(state)));
-    sendJson(res, 200, { ok: true, favorites: saved });
+    const actor = authActorFromState(state);
+    const incoming = Array.isArray(body?.favorites) ? body.favorites : [];
+    // Выданные подписки собираются на лету, в чужом списке их хранить нечего.
+    const own = incoming.filter((item) => !item?.derived);
+    const saved = await setFavoritesRow(key, await filterFavoritesByAccess(own, actor));
+    const shared = await grantedFavorites(req, actor, saved);
+    sendJson(res, 200, { ok: true, favorites: [...saved, ...shared] });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
+  }
+}
+
+/**
+ * Восстановление списка подписок из резервной копии.
+ *
+ * Копия хранит и короткие ссылки. Если их в базе уже нет — например, копию
+ * переносят на чистую установку, — ссылки создаются заново с теми же
+ * идентификаторами, иначе восстановленный список указывал бы в никуда.
+ */
+async function handleFavoritesRestore(req, res) {
+  const state = await requireEditorAuth(req, res);
+  if (!state) return;
+  const key = String(state.user?.username || "").trim() || "public";
+  try {
+    const body = await readJsonBody(req, 8 * 1024 * 1024);
+    const items = Array.isArray(body?.favorites) ? body.favorites : (Array.isArray(body?.items) ? body.items : []);
+    const actor = authActorFromState(state);
+    const restored = [];
+    const report = { total: items.length, created: 0, kept: 0, skipped: 0, skippedTitles: [] };
+    for (const item of items) {
+      if (!item || typeof item !== "object" || item.derived) continue;
+      const shortId = String(item.shortId || "").trim();
+      const params = { ...(item.payload || {}) };
+      if (!shortId) {
+        restored.push({ ...item, permissions: undefined });
+        report.kept += 1;
+        continue;
+      }
+      const existing = await getShortLinkRow(shortId);
+      if (existing) {
+        const permission = await getShortLinkPermissions(shortId, actor);
+        if (!permission?.canView) {
+          report.skipped += 1;
+          report.skippedTitles.push(String(item.title || shortId));
+          continue;
+        }
+        const urls = shortLinkPublicUrls(req, existing.id, existing.params || {});
+        restored.push({ ...item, url: urls.shortUrl, permissions: undefined });
+        report.kept += 1;
+        continue;
+      }
+      const created = await createShortLink({
+        id: shortId,
+        params,
+        title: String(item.title || ""),
+        ownerUsername: actor.username,
+        hidden: Boolean(item.hidden),
+        tags: Array.isArray(item.tags) ? item.tags : [],
+      });
+      if (!created.ok) {
+        report.skipped += 1;
+        report.skippedTitles.push(String(item.title || shortId));
+        continue;
+      }
+      const urls = shortLinkPublicUrls(req, created.link.id, created.link.params || {});
+      restored.push({ ...item, url: urls.shortUrl, permissions: undefined });
+      report.created += 1;
+    }
+    const saved = await setFavoritesRow(key, await filterFavoritesByAccess(restored, actor));
+    const shared = await grantedFavorites(req, actor, saved);
+    sendJson(res, 200, { ok: true, favorites: [...saved, ...shared], report });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "restore failed" });
+  }
+}
+
+function normalizeRemoteSyncUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) throw new Error("remoteUrl is required");
+  const url = new URL(raw);
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("remoteUrl must use http or https");
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  return url;
+}
+
+async function handleSyncExport(req, res) {
+  if (!requireSyncToken(req, res)) return;
+  try {
+    const bundle = await exportSyncBundle({
+      profiles: String(new URL(req.url || "/", "http://localhost").searchParams.get("profiles") || "1") !== "0",
+    });
+    sendJson(res, 200, { ok: true, bundle });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e?.message || "sync export failed" });
+  }
+}
+
+async function handleSyncImport(req, res) {
+  if (!(await requireAdminOrSyncToken(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 25 * 1024 * 1024);
+    const result = await importSyncBundle(body?.bundle || body, { dryRun: Boolean(body?.dryRun) });
+    sendJson(res, 200, { ok: true, imported: result, dryRun: Boolean(body?.dryRun) });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "sync import failed" });
+  }
+}
+
+async function handleSyncPull(req, res) {
+  if (!(await requireAdminOrSyncToken(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    const remote = normalizeRemoteSyncUrl(body?.remoteUrl || body?.remote_url);
+    const remoteToken = String(body?.remoteToken || body?.remote_token || SYNC_API_TOKEN || "").trim();
+    if (!remoteToken) {
+      sendJson(res, 400, { ok: false, error: "remoteToken is required" });
+      return;
+    }
+    const exportUrl = new URL(remote.toString());
+    exportUrl.pathname = `${exportUrl.pathname}/api/sync/export`.replace(/\/{2,}/g, "/");
+    const resp = await fetch(exportUrl, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "Authorization": `Bearer ${remoteToken}`,
+      },
+    });
+    const json = await resp.json().catch(() => null);
+    if (!resp.ok || !json?.ok) {
+      sendJson(res, resp.status || 502, {
+        ok: false,
+        error: json?.error || `remote sync export failed (${resp.status})`,
+      });
+      return;
+    }
+    const result = await importSyncBundle(json.bundle, { dryRun: Boolean(body?.dryRun) });
+    sendJson(res, 200, {
+      ok: true,
+      remoteUrl: remote.origin,
+      imported: result,
+      dryRun: Boolean(body?.dryRun),
+      exportedAt: json.bundle?.exportedAt || "",
+    });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "sync pull failed" });
   }
 }
 
@@ -1862,12 +2351,32 @@ const server = http.createServer(async (req, res) => {
     await handleAuthMe(req, res);
     return;
   }
+  if (req.method === "GET" && routePath === "/auth/start") {
+    await handleAuthStart(req, url, res);
+    return;
+  }
+  if (req.method === "GET" && routePath === "/auth/callback") {
+    await handleAuthCallback(req, url, res);
+    return;
+  }
   if (req.method === "POST" && routePath === "/api/auth/login") {
     await handleAuthLogin(req, res);
     return;
   }
   if (req.method === "POST" && routePath === "/api/auth/logout") {
     await handleAuthLogout(req, res);
+    return;
+  }
+  if (req.method === "GET" && routePath === "/api/sync/export") {
+    await handleSyncExport(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/sync/import") {
+    await handleSyncImport(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/sync/pull") {
+    await handleSyncPull(req, res);
     return;
   }
   if (req.method === "GET" && routePath === "/api/favorites") {
@@ -1878,6 +2387,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "PUT" && routePath === "/api/favorites") {
     if (!(await requireApiAuth(req, res))) return;
     await handleFavoritesPut(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/favorites/restore") {
+    await handleFavoritesRestore(req, res);
     return;
   }
   if (req.method === "POST" && routePath === "/search") {
@@ -1903,6 +2416,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && routePath === "/") {
+    const state = await getAuthState(req);
+    if (!state.authenticated) {
+      if (state.denied) {
+        sendAuthProblem(res, 403, "Нет доступа к Sub Lab", "В account для этой учётной записи не назначена роль sub_mirror.", {
+          "Set-Cookie": clearSessionCookies(),
+        });
+        return;
+      }
+      const start = authStartLocation(req, "/");
+      redirect(res, start.location, { "Set-Cookie": [start.cookie, ...clearSessionCookies()] });
+      return;
+    }
     if (!serveFrontendIndex(res)) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(renderHomePage());
@@ -1911,7 +2436,18 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && routePath === "/admin") {
     const state = await getAuthState(req);
-    if (state.enabled && (!state.authenticated || state.user?.role !== "admin")) {
+    if (!state.authenticated) {
+      if (state.denied) {
+        sendAuthProblem(res, 403, "Нет доступа к Sub Lab", "В account для этой учётной записи не назначена роль sub_mirror.", {
+          "Set-Cookie": clearSessionCookies(),
+        });
+        return;
+      }
+      const start = authStartLocation(req, "/admin");
+      redirect(res, start.location, { "Set-Cookie": [start.cookie, ...clearSessionCookies()] });
+      return;
+    }
+    if (state.user?.role !== "admin") {
       res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("forbidden");
       return;
@@ -1986,12 +2522,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "PUT" && routePath === "/api/profile-editor/file") {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleProfileEditorSave(req, res);
     return;
   }
   if (req.method === "DELETE" && routePath === "/api/profile-editor/file") {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     await handleProfileEditorDelete(req, url, res);
     return;
   }
@@ -2001,12 +2537,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "POST" && routePath === "/api/local-sources") {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleCreateLocalSource(req, res);
     return;
   }
   if (req.method === "POST" && routePath === "/api/merged-sources") {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleCreateMergedSource(req, res);
     return;
   }
@@ -2026,7 +2562,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "POST" && routePath === "/api/short-links") {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleCreateShortLink(req, res);
     return;
   }
@@ -2041,7 +2577,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "PUT" && shortAccessApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     await handlePutShortLinkAccess(req, res, shortAccessApiMatch[1]);
     return;
   }
@@ -2051,7 +2587,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "PUT" && shortOverridesApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     await handlePutShortLinkOverrides(req, res, shortOverridesApiMatch[1]);
     return;
   }
@@ -2067,22 +2603,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "PATCH" && shortUsersApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleUpdateShortLinkUsersPolicy(req, res, shortUsersApiMatch[1]);
     return;
   }
   if (req.method === "PATCH" && shortUserApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleUpdateShortLinkUser(req, res, shortUserApiMatch[1], shortUserApiMatch[2]);
     return;
   }
   if (req.method === "DELETE" && shortUserApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleDeleteShortLinkUser(req, res, shortUserApiMatch[1], shortUserApiMatch[2]);
     return;
   }
   if (req.method === "PUT" && shortApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleUpdateShortLink(req, res, shortApiMatch[1]);
     return;
   }
@@ -2091,7 +2627,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "POST" && routePath === "/api/mock-sources") {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleCreateMockSource(req, res);
     return;
   }
@@ -2101,7 +2637,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "PUT" && mockApiMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     void handleUpdateMockSource(req, res, mockApiMatch[1]);
     return;
   }
@@ -2111,7 +2647,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === "POST" && mockLogsMatch) {
-    if (!(await requireApiAuth(req, res))) return;
+    if (!(await requireEditorAuth(req, res))) return;
     await handleClearMockLogs(req, res, mockLogsMatch[1]);
     return;
   }
@@ -2163,6 +2699,9 @@ if (isMain) {
 }
 
 export {
+  SESSION_COOKIE,
+  ACCOUNT_SESSION_COOKIE,
+  authUserFromAccount,
   normalizeOutput,
   renderHomePage,
   parseServersFromText,

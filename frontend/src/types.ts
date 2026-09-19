@@ -1,5 +1,7 @@
 export type Endpoint = "sub" | "last";
 export type Output = "raw" | "raw_base64" | "json" | "yml";
+/** Насколько разворачивать записи подписки в форматах без вложенности. */
+export type NodesMode = "collapse" | "group" | "expand";
 
 export type SubscriptionPayload = {
   endpoint: Endpoint;
@@ -12,6 +14,7 @@ export type SubscriptionPayload = {
   profiles?: string;
   hwid?: string;
   clash_groups?: string;
+  nodes?: NodesMode | "";
 };
 
 export type FavoriteItem = {
@@ -23,6 +26,8 @@ export type FavoriteItem = {
   shortId?: string;
   hidden?: boolean;
   permissions?: ShortLinkPermissions;
+  /** Подписка выдана через доступ к короткой ссылке: в своём списке не хранится. */
+  derived?: boolean;
   ts: number;
 };
 
@@ -31,6 +36,8 @@ export type ShortLinkPermissions = {
   canEdit: boolean;
   canManageAccess: boolean;
   accessLevel: "" | "view" | "edit";
+  /** Короткой ссылки нет в базе: запись осталась от прежней установки. */
+  missing?: boolean;
 };
 
 export type ShortLinkAccessGrant = {
@@ -153,9 +160,14 @@ export type MockLogEntry = {
   bodyBytes?: number;
 };
 
+/** Роль в account: `viewer` смотрит, `editor` правит, `admin` управляет всем. */
+export type AccountRole = "none" | "viewer" | "editor" | "admin";
+
 export type AuthUser = {
   username: string;
   role: "user" | "admin";
+  accountRole?: AccountRole;
+  canEdit?: boolean;
 };
 
 export type ShortLinkUserHistoryEntry = {
