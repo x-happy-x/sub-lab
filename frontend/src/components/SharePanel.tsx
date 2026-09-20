@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Tooltip } from "@x-happy-x/ui-kit";
+import { Button, Tooltip } from "../ui";
 import {
   AppClashmiIcon,
   AppFlclashxIcon,
@@ -339,6 +339,7 @@ export function SharePanel({
         </section>
       ) : (centeredTitle ? <h2 className="share-centered-title">{centeredTitle}</h2> : null))}
 
+      <section className="card share-connect">
       <div className="share-os-row">
         <strong className="share-connect-title">Подключение</strong>
         <div className="share-os-dropdown" ref={osDropRef}>
@@ -375,6 +376,7 @@ export function SharePanel({
         ))}
       </div>
       {visibleApps.length === 0 ? <div className="status">Для выбранной ОС нет приложений.</div> : null}
+      </section>
 
       <div className="share-guide">
         {guideLoading ? <div className="status">Загрузка инструкции...</div> : null}
@@ -419,7 +421,7 @@ export function SharePanel({
       </div>
 
       <div className="share-links-toggle">
-        <Button className="btn" onClick={() => setShowLinkBlock((v) => !v)}>
+        <Button block onClick={() => setShowLinkBlock((v) => !v)}>
           {showLinkBlock ? "Скрыть ссылку и QR" : "Показать ссылку и QR"}
         </Button>
       </div>
@@ -427,10 +429,10 @@ export function SharePanel({
       {showLinkBlock ? (
         <div className="share-links-block">
           <div className="share-actions share-actions-copy">
-            <Button className="btn" onClick={() => onCopy(shortUrl || fullUrl)}>
+            <Button onClick={() => onCopy(shortUrl || fullUrl)}>
               <CopyIcon className="btn-icon" /> Короткая ссылка
             </Button>
-            <Button className="btn" onClick={() => onCopy(fullUrl)}>
+            <Button onClick={() => onCopy(fullUrl)}>
               <CopyIcon className="btn-icon" /> Полная ссылка
             </Button>
           </div>
@@ -447,16 +449,14 @@ export function SharePanel({
                   ))}
                 </select>
                 {hasCopyableServerUri ? (
-                  <Button className="btn" onClick={() => onCopy(selectedServerUri)}>
+                  <Button onClick={() => onCopy(selectedServerUri)}>
                     <CopyIcon className="btn-icon" /> Копировать ссылку
                   </Button>
                 ) : (
                   <Tooltip content="Для этой подписки нельзя получить прямую ссылку сервера">
-                    <span className="ui-tip-wrap">
-                      <Button className="btn" disabled>
-                        <CopyIcon className="btn-icon" /> Копировать ссылку
-                      </Button>
-                    </span>
+                    <Button disabled>
+                      <CopyIcon className="btn-icon" /> Копировать ссылку
+                    </Button>
                   </Tooltip>
                 )}
               </div>

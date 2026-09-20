@@ -142,6 +142,33 @@ function runMigrations(db) {
       accept_language TEXT NOT NULL DEFAULT ''
     );
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS short_link_daily_hits (
+      short_link_id TEXT NOT NULL,
+      day TEXT NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (short_link_id, day)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sync_peers (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL DEFAULT '',
+      remote_url TEXT NOT NULL,
+      remote_token TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      interval_minutes INTEGER NOT NULL DEFAULT 0,
+      include_profiles INTEGER NOT NULL DEFAULT 1,
+      last_status TEXT NOT NULL DEFAULT '',
+      last_error TEXT NOT NULL DEFAULT '',
+      last_report_json TEXT NOT NULL DEFAULT '{}',
+      last_synced_at TEXT NOT NULL DEFAULT '',
+      last_attempt_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.run("CREATE INDEX IF NOT EXISTS idx_short_link_daily_hits_day ON short_link_daily_hits (day)");
   db.run("CREATE INDEX IF NOT EXISTS idx_short_link_users_short_link ON short_link_users (short_link_id)");
   db.run("CREATE INDEX IF NOT EXISTS idx_short_link_users_last_seen ON short_link_users (short_link_id, last_seen_at DESC)");
   db.run("CREATE INDEX IF NOT EXISTS idx_short_link_user_history_lookup ON short_link_user_history (short_link_id, hwid, changed_at DESC)");
@@ -706,11 +733,33 @@ async function renameShortLinkRow(oldId, newId) {
   return await getShortLinkRow(target);
 }
 
+function dayKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Счётчик обращений: общий в `short_links.hits` и посуточный отдельной таблицей.
+ *
+ * Общий счётчик отвечает на «сколько всего», посуточный — на «когда»: без него
+ * график активности построить не из чего, история устройств пишется только на
+ * первую встречу и на смену данных.
+ */
 async function incrementShortLinkHits(id) {
   const db = await getDb();
+  const linkId = String(id || "").trim();
+  if (!linkId) return;
   const stmt = db.prepare("UPDATE short_links SET hits = hits + 1 WHERE id = ?");
-  stmt.run([id]);
+  stmt.run([linkId]);
   stmt.free();
+  const dailyStmt = db.prepare(`
+    INSERT INTO short_link_daily_hits (short_link_id, day, hits)
+    VALUES (?, ?, 1)
+    ON CONFLICT (short_link_id, day) DO UPDATE SET hits = hits + 1
+  `);
+  dailyStmt.run([linkId, dayKey()]);
+  dailyStmt.free();
   saveDb(db);
 }
 
@@ -1012,6 +1061,31 @@ async function listShortLinksByTagForActor(tag, actor) {
 }
 
 /**
+ * Все короткие ссылки установки — для админского обзора.
+ *
+ * Обычному пользователю такой список не положен, поэтому вызывающая сторона
+ * обязана сама проверить роль: здесь фильтрации по доступу нет.
+ */
+async function listAllShortLinkRows() {
+  const db = await getDb();
+  return allRows(db, `
+    SELECT id, params_json, title, owner_username, hidden, tags_json, created_at, updated_at, hits
+    FROM short_links
+    ORDER BY updated_at DESC, created_at DESC
+  `).map((row) => ({
+    id: String(row.id || ""),
+    params: parseJsonObjectText(row.params_json),
+    title: String(row.title || ""),
+    ownerUsername: normalizeUsername(row.owner_username),
+    hidden: Number(row.hidden || 0) > 0,
+    tags: parseJsonArrayText(row.tags_json),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+    hits: Math.max(0, Number(row.hits || 0)),
+  }));
+}
+
+/**
  * Короткие ссылки, к которым пользователю выдали доступ.
  *
  * Свои ссылки сюда не попадают: их владелец и так держит в своём списке, а вот
@@ -1303,13 +1377,16 @@ async function recordShortLinkUserVisit(shortLinkId, hwid, info) {
   const id = String(shortLinkId || "").trim();
   if (!id) throw new Error("short link id is required");
   const normalizedHwid = normalizeHwid(hwid);
-  if (!normalizedHwid) {
-    return { ok: true, skipped: true, reason: "empty hwid" };
-  }
   const policy = getShortLinkUserPolicyRow(db, id) || {
     shortLinkId: id,
     ...defaultShortLinkPolicy(),
   };
+  // Без hwid устройство не опознать: ни заблокировать, ни посчитать в лимит.
+  // Решение, что с таким запросом делать, принимает вызывающая сторона —
+  // ей отдаём политику, чтобы она знала, следит ли эта ссылка за устройствами.
+  if (!normalizedHwid) {
+    return { ok: true, skipped: true, reason: "empty hwid", policy };
+  }
   const userInfo = mapUserInfo(info);
   const now = nowIso();
   const existing = getShortLinkUserRow(db, id, normalizedHwid);
@@ -1954,6 +2031,172 @@ async function pruneSubscriptionFeedSnapshots(feedId, retainCount = MAX_SNAPSHOT
   return removed;
 }
 
+/**
+ * Пиры синхронизации.
+ *
+ * Связь односторонняя: эта установка ходит к удалённой за выгрузкой и
+ * накатывает её у себя. Удалённая о нас ничего не знает — ей достаточно
+ * отдавать /api/sync/export по своему токену.
+ */
+function toPublicSyncPeer(row) {
+  const token = String(row?.remote_token || "");
+  let lastReport = {};
+  try {
+    const parsed = JSON.parse(String(row?.last_report_json || "{}"));
+    if (parsed && typeof parsed === "object") lastReport = parsed;
+  } catch {
+    lastReport = {};
+  }
+  return {
+    id: String(row?.id || ""),
+    label: String(row?.label || ""),
+    remoteUrl: String(row?.remote_url || ""),
+    // Токен наружу не отдаём никогда: интерфейсу хватает признака, что он задан.
+    hasToken: token.length > 0,
+    enabled: Number(row?.enabled || 0) > 0,
+    intervalMinutes: Math.max(0, Number(row?.interval_minutes || 0)),
+    includeProfiles: Number(row?.include_profiles || 0) > 0,
+    lastStatus: String(row?.last_status || ""),
+    lastError: String(row?.last_error || ""),
+    lastReport,
+    lastSyncedAt: String(row?.last_synced_at || ""),
+    lastAttemptAt: String(row?.last_attempt_at || ""),
+    createdAt: String(row?.created_at || ""),
+    updatedAt: String(row?.updated_at || ""),
+  };
+}
+
+async function listSyncPeers() {
+  const db = await getDb();
+  return allRows(db, "SELECT * FROM sync_peers ORDER BY created_at ASC, id ASC").map(toPublicSyncPeer);
+}
+
+async function getSyncPeer(id) {
+  const db = await getDb();
+  const rows = allRows(db, "SELECT * FROM sync_peers WHERE id = ? LIMIT 1", [String(id || "")]);
+  return rows.length ? toPublicSyncPeer(rows[0]) : null;
+}
+
+/** То же самое, но с токеном: нужно только тем, кто реально идёт по сети. */
+async function getSyncPeerWithToken(id) {
+  const db = await getDb();
+  const rows = allRows(db, "SELECT * FROM sync_peers WHERE id = ? LIMIT 1", [String(id || "")]);
+  if (!rows.length) return null;
+  return { ...toPublicSyncPeer(rows[0]), remoteToken: String(rows[0].remote_token || "") };
+}
+
+function normalizeSyncPeerInput(input, previous = null) {
+  const remoteUrl = String(input?.remoteUrl ?? input?.remote_url ?? previous?.remoteUrl ?? "").trim();
+  if (!remoteUrl) throw new Error("remoteUrl is required");
+  const parsed = new URL(remoteUrl);
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("remoteUrl must use http or https");
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  parsed.search = "";
+  parsed.hash = "";
+  const rawToken = input?.remoteToken ?? input?.remote_token;
+  return {
+    label: String(input?.label ?? previous?.label ?? "").trim().slice(0, 120),
+    remoteUrl: parsed.toString().replace(/\/+$/, ""),
+    // Пустой токен в правке означает «оставить прежний», иначе его пришлось бы
+    // вводить заново при каждом изменении расписания.
+    remoteToken: rawToken === undefined || rawToken === null || String(rawToken).trim() === ""
+      ? String(previous?.remoteToken || "")
+      : String(rawToken).trim(),
+    enabled: input?.enabled === undefined ? (previous ? previous.enabled : true) : Boolean(input.enabled),
+    intervalMinutes: Math.min(10080, Math.max(0, Math.round(Number(
+      input?.intervalMinutes ?? input?.interval_minutes ?? previous?.intervalMinutes ?? 0,
+    ) || 0))),
+    includeProfiles: input?.includeProfiles === undefined
+      ? (previous ? previous.includeProfiles : true)
+      : Boolean(input.includeProfiles),
+  };
+}
+
+async function createSyncPeer(input) {
+  const db = await getDb();
+  const next = normalizeSyncPeerInput(input);
+  if (!next.remoteToken) throw new Error("remoteToken is required");
+  const id = crypto.randomUUID();
+  const now = nowIso();
+  const stmt = db.prepare(`
+    INSERT INTO sync_peers (id, label, remote_url, remote_token, enabled, interval_minutes, include_profiles, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run([
+    id,
+    next.label,
+    next.remoteUrl,
+    next.remoteToken,
+    next.enabled ? 1 : 0,
+    next.intervalMinutes,
+    next.includeProfiles ? 1 : 0,
+    now,
+    now,
+  ]);
+  stmt.free();
+  saveDb(db);
+  return await getSyncPeer(id);
+}
+
+async function updateSyncPeer(id, patch) {
+  const previous = await getSyncPeerWithToken(id);
+  if (!previous) return null;
+  const db = await getDb();
+  const next = normalizeSyncPeerInput(patch, previous);
+  if (!next.remoteToken) throw new Error("remoteToken is required");
+  const stmt = db.prepare(`
+    UPDATE sync_peers
+    SET label = ?, remote_url = ?, remote_token = ?, enabled = ?, interval_minutes = ?, include_profiles = ?, updated_at = ?
+    WHERE id = ?
+  `);
+  stmt.run([
+    next.label,
+    next.remoteUrl,
+    next.remoteToken,
+    next.enabled ? 1 : 0,
+    next.intervalMinutes,
+    next.includeProfiles ? 1 : 0,
+    nowIso(),
+    previous.id,
+  ]);
+  stmt.free();
+  saveDb(db);
+  return await getSyncPeer(previous.id);
+}
+
+async function deleteSyncPeer(id) {
+  const db = await getDb();
+  const stmt = db.prepare("DELETE FROM sync_peers WHERE id = ?");
+  stmt.run([String(id || "")]);
+  stmt.free();
+  saveDb(db);
+  return true;
+}
+
+/** Итог последнего прогона: по нему интерфейс рисует статус пира. */
+async function recordSyncPeerRun(id, { status, error = "", report = null, synced = false } = {}) {
+  const db = await getDb();
+  const now = nowIso();
+  const stmt = db.prepare(`
+    UPDATE sync_peers
+    SET last_status = ?, last_error = ?, last_report_json = ?, last_attempt_at = ?,
+        last_synced_at = CASE WHEN ? = 1 THEN ? ELSE last_synced_at END
+    WHERE id = ?
+  `);
+  stmt.run([
+    String(status || ""),
+    String(error || "").slice(0, 500),
+    safeJsonStringify(report && typeof report === "object" ? report : {}, "{}"),
+    now,
+    synced ? 1 : 0,
+    now,
+    String(id || ""),
+  ]);
+  stmt.free();
+  saveDb(db);
+  return await getSyncPeer(id);
+}
+
 async function exportSyncBundle(options = {}) {
   const db = await getDb();
   const includeProfiles = options?.profiles !== false;
@@ -2414,12 +2657,212 @@ async function importSyncBundle(bundle, options = {}) {
   return counters;
 }
 
+/* =========================================================================
+   Сводная статистика панели
+   ========================================================================= */
+
+function statsDayList(days) {
+  const out = [];
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const day = new Date(today.getTime() - i * 86400000);
+    out.push(dayKey(day));
+  }
+  return out;
+}
+
+function placeholders(count) {
+  return new Array(count).fill("?").join(", ");
+}
+
+function countByKey(rows, key, fallbackLabel) {
+  const map = new Map();
+  for (const row of rows) {
+    const raw = String(row?.[key] || "").trim();
+    const label = raw || fallbackLabel;
+    map.set(label, (map.get(label) || 0) + 1);
+  }
+  return [...map.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+function emptyUsageStats(days) {
+  return {
+    days,
+    scope: "own",
+    generatedAt: nowIso(),
+    totals: {
+      subscriptions: 0,
+      hiddenSubscriptions: 0,
+      devices: 0,
+      blockedDevices: 0,
+      activeDevices24h: 0,
+      activeDevices7d: 0,
+      activeDevices30d: 0,
+      hits: 0,
+      hitsPeriod: 0,
+      newDevicesPeriod: 0,
+    },
+    daily: statsDayList(days).map((day) => ({ day, hits: 0, newDevices: 0 })),
+    byOs: [],
+    byApp: [],
+    topLinks: [],
+    recentDevices: [],
+  };
+}
+
+/**
+ * Статистика по тем подпискам, которые актор вправе видеть.
+ *
+ * Админ считает всю панель, остальные — свои ссылки и выданные им доступы:
+ * одна и та же выборка, что и в списке подписок, иначе цифры в статистике
+ * расходились бы со списком на главной.
+ */
+async function collectUsageStats(actor, options = {}) {
+  const requestedDays = Number(options?.days);
+  const days = Math.min(180, Math.max(7, Number.isFinite(requestedDays) ? Math.round(requestedDays) : 30));
+  const role = normalizeRole(actor?.role);
+  const username = normalizeUsername(actor?.username);
+  if (!username) return emptyUsageStats(days);
+
+  const db = await getDb();
+  const isAdmin = role === "admin";
+  const linkRows = isAdmin
+    ? allRows(db, `
+      SELECT id, title, owner_username, hidden, hits, created_at
+      FROM short_links
+      ORDER BY updated_at DESC, id ASC
+    `)
+    : allRows(db, `
+      SELECT DISTINCT s.id AS id, s.title AS title, s.owner_username AS owner_username,
+             s.hidden AS hidden, s.hits AS hits, s.created_at AS created_at
+      FROM short_links s
+      LEFT JOIN short_link_access a ON a.short_link_id = s.id AND a.username = ?
+      WHERE s.owner_username = ? OR a.username IS NOT NULL
+      ORDER BY s.updated_at DESC, s.id ASC
+    `, [username, username]);
+
+  const stats = emptyUsageStats(days);
+  stats.scope = isAdmin ? "all" : "own";
+  if (linkRows.length === 0) return stats;
+
+  const ids = linkRows.map((row) => String(row.id || "")).filter(Boolean);
+  const inList = placeholders(ids.length);
+  const dayList = statsDayList(days);
+  const periodStart = dayList[0];
+  const now = Date.now();
+  const titleById = new Map(linkRows.map((row) => [String(row.id || ""), String(row.title || "")]));
+
+  stats.totals.subscriptions = linkRows.length;
+  stats.totals.hiddenSubscriptions = linkRows.filter((row) => Number(row.hidden || 0) > 0).length;
+  stats.totals.hits = linkRows.reduce((sum, row) => sum + Math.max(0, Number(row.hits || 0)), 0);
+
+  const dailyRows = allRows(db, `
+    SELECT day, SUM(hits) AS hits
+    FROM short_link_daily_hits
+    WHERE short_link_id IN (${inList}) AND day >= ?
+    GROUP BY day
+  `, [...ids, periodStart]);
+  const hitsByDay = new Map(dailyRows.map((row) => [String(row.day || ""), Math.max(0, Number(row.hits || 0))]));
+
+  const deviceRows = allRows(db, `
+    SELECT short_link_id, hwid, first_seen_at, last_seen_at, blocked,
+           last_device_os, last_app, last_device_model, last_ip
+    FROM short_link_users
+    WHERE short_link_id IN (${inList})
+  `, ids);
+
+  const newByDay = new Map();
+  for (const row of deviceRows) {
+    const day = String(row.first_seen_at || "").slice(0, 10);
+    if (!day || day < periodStart) continue;
+    newByDay.set(day, (newByDay.get(day) || 0) + 1);
+  }
+
+  stats.daily = dayList.map((day) => ({
+    day,
+    hits: hitsByDay.get(day) || 0,
+    newDevices: newByDay.get(day) || 0,
+  }));
+  stats.totals.hitsPeriod = stats.daily.reduce((sum, item) => sum + item.hits, 0);
+  stats.totals.newDevicesPeriod = stats.daily.reduce((sum, item) => sum + item.newDevices, 0);
+
+  const lastSeenMs = (row) => {
+    const ts = Date.parse(String(row?.last_seen_at || ""));
+    return Number.isFinite(ts) ? ts : 0;
+  };
+  stats.totals.devices = deviceRows.length;
+  stats.totals.blockedDevices = deviceRows.filter((row) => Number(row.blocked || 0) > 0).length;
+  stats.totals.activeDevices24h = deviceRows.filter((row) => now - lastSeenMs(row) <= 86400000).length;
+  stats.totals.activeDevices7d = deviceRows.filter((row) => now - lastSeenMs(row) <= 7 * 86400000).length;
+  stats.totals.activeDevices30d = deviceRows.filter((row) => now - lastSeenMs(row) <= 30 * 86400000).length;
+
+  stats.byOs = countByKey(deviceRows, "last_device_os", "не определена").slice(0, 8);
+  stats.byApp = countByKey(deviceRows, "last_app", "не определено").slice(0, 8);
+
+  const perLink = new Map(ids.map((id) => [id, { devices: 0, lastSeenAt: "" }]));
+  for (const row of deviceRows) {
+    const bucket = perLink.get(String(row.short_link_id || ""));
+    if (!bucket) continue;
+    bucket.devices += 1;
+    const seen = String(row.last_seen_at || "");
+    if (seen > bucket.lastSeenAt) bucket.lastSeenAt = seen;
+  }
+
+  const periodHitsByLink = new Map();
+  for (const row of allRows(db, `
+    SELECT short_link_id, SUM(hits) AS hits
+    FROM short_link_daily_hits
+    WHERE short_link_id IN (${inList}) AND day >= ?
+    GROUP BY short_link_id
+  `, [...ids, periodStart])) {
+    periodHitsByLink.set(String(row.short_link_id || ""), Math.max(0, Number(row.hits || 0)));
+  }
+
+  stats.topLinks = linkRows
+    .map((row) => {
+      const id = String(row.id || "");
+      const bucket = perLink.get(id) || { devices: 0, lastSeenAt: "" };
+      return {
+        id,
+        title: titleById.get(id) || id,
+        hits: Math.max(0, Number(row.hits || 0)),
+        hitsPeriod: periodHitsByLink.get(id) || 0,
+        devices: bucket.devices,
+        lastSeenAt: bucket.lastSeenAt,
+      };
+    })
+    .sort((a, b) => b.hitsPeriod - a.hitsPeriod || b.hits - a.hits || b.devices - a.devices)
+    .slice(0, 8);
+
+  stats.recentDevices = deviceRows
+    .slice()
+    .sort((a, b) => lastSeenMs(b) - lastSeenMs(a))
+    .slice(0, 12)
+    .map((row) => ({
+      hwid: String(row.hwid || ""),
+      shortLinkId: String(row.short_link_id || ""),
+      title: titleById.get(String(row.short_link_id || "")) || String(row.short_link_id || ""),
+      os: String(row.last_device_os || ""),
+      app: String(row.last_app || ""),
+      deviceModel: String(row.last_device_model || ""),
+      blocked: Number(row.blocked || 0) > 0,
+      firstSeenAt: String(row.first_seen_at || ""),
+      lastSeenAt: String(row.last_seen_at || ""),
+    }));
+
+  return stats;
+}
+
 export {
   buildSubscriptionFeedKey,
   createShortLinkRow,
   getShortLinkRow,
   getShortLinkPermissions,
   listShortLinksByTagForActor,
+  listAllShortLinkRows,
   listShortLinksGrantedTo,
   listShortLinkAccess,
   replaceShortLinkAccess,
@@ -2439,6 +2882,7 @@ export {
   setFavoritesRow,
   recordShortLinkUserVisit,
   listShortLinkUsers,
+  collectUsageStats,
   updateShortLinkUserPolicy,
   setShortLinkUserBlocked,
   deleteShortLinkUser,
@@ -2458,6 +2902,13 @@ export {
   getSubscriptionOverridesForFeed,
   upsertSubscriptionOverrides,
   pruneSubscriptionFeedSnapshots,
+  listSyncPeers,
+  getSyncPeer,
+  getSyncPeerWithToken,
+  createSyncPeer,
+  updateSyncPeer,
+  deleteSyncPeer,
+  recordSyncPeerRun,
   exportSyncBundle,
   importSyncBundle,
 };

@@ -28,7 +28,48 @@ export type FavoriteItem = {
   permissions?: ShortLinkPermissions;
   /** Подписка выдана через доступ к короткой ссылке: в своём списке не хранится. */
   derived?: boolean;
+  /** Чужая подписка, которую видит админ. В фильтре по умолчанию скрыта. */
+  foreign?: boolean;
+  /** Владелец короткой ссылки: пусто у ссылок, созданных до появления ролей. */
+  ownerUsername?: string;
   ts: number;
+};
+
+/**
+ * Удалённая установка, с которой этот сервер тянет данные.
+ *
+ * Токен наружу не отдаётся: интерфейс знает только, задан он или нет.
+ */
+export type SyncPeer = {
+  id: string;
+  label: string;
+  remoteUrl: string;
+  hasToken: boolean;
+  enabled: boolean;
+  intervalMinutes: number;
+  includeProfiles: boolean;
+  lastStatus: string;
+  lastError: string;
+  lastReport: Record<string, unknown>;
+  lastSyncedAt: string;
+  lastAttemptAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SyncPeerInput = {
+  label?: string;
+  remoteUrl?: string;
+  remoteToken?: string;
+  enabled?: boolean;
+  intervalMinutes?: number;
+  includeProfiles?: boolean;
+};
+
+export type SyncPeerTestResult = {
+  remoteUrl: string;
+  exportedAt: string;
+  available: Record<string, number>;
 };
 
 export type ShortLinkPermissions = {
@@ -214,4 +255,107 @@ export type ShortLinkUsersData = {
     activeCount: number;
   };
   users: ShortLinkUserItem[];
+};
+
+export type UsageStatsTotals = {
+  subscriptions: number;
+  hiddenSubscriptions: number;
+  devices: number;
+  blockedDevices: number;
+  activeDevices24h: number;
+  activeDevices7d: number;
+  activeDevices30d: number;
+  hits: number;
+  hitsPeriod: number;
+  newDevicesPeriod: number;
+};
+
+export type UsageStatsDay = {
+  day: string;
+  hits: number;
+  newDevices: number;
+};
+
+export type UsageStatsBreakdown = {
+  label: string;
+  count: number;
+};
+
+export type UsageStatsTopLink = {
+  id: string;
+  title: string;
+  hits: number;
+  hitsPeriod: number;
+  devices: number;
+  lastSeenAt: string;
+};
+
+export type UsageStatsDevice = {
+  hwid: string;
+  shortLinkId: string;
+  title: string;
+  os: string;
+  app: string;
+  deviceModel: string;
+  blocked: boolean;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type UsageStats = {
+  days: number;
+  scope: "all" | "own";
+  generatedAt: string;
+  totals: UsageStatsTotals;
+  daily: UsageStatsDay[];
+  byOs: UsageStatsBreakdown[];
+  byApp: UsageStatsBreakdown[];
+  topLinks: UsageStatsTopLink[];
+  recentDevices: UsageStatsDevice[];
+};
+
+/** Что делать, когда регулярка не нашла ни одного сервера источника. */
+export type MergeOnEmpty = "all" | "skip" | "error";
+
+export type MergeItem = SubscriptionPayload & {
+  title?: string;
+  shortId?: string;
+  filter?: { pattern: string; onEmpty: MergeOnEmpty };
+};
+
+export type MergedSource = {
+  id: string;
+  name: string;
+  items: MergeItem[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MergePreviewResult = {
+  ok: boolean;
+  error: string;
+  names: string[];
+};
+
+/** Вариант замера: что именно пингуем до сервера. */
+export type PingMode = "tcp" | "tls" | "dns";
+
+export type PingResult = {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  ok: boolean;
+  best: number;
+  worst: number;
+  average: number;
+  loss: number;
+  error: string;
+};
+
+export type PingResponse = {
+  mode: PingMode;
+  attempts: number;
+  timeoutMs: number;
+  results: PingResult[];
 };

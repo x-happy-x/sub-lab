@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Textarea } from "@x-happy-x/ui-kit";
-import type { NotificationLevel } from "@x-happy-x/ui-kit";
+import { Button, Textarea } from "../ui";
+import type { NotificationLevel } from "../ui";
 import type { FavoriteItem } from "../types";
 import { fetchShortLinkOverrides, previewShortLinkOverrides, updateShortLinkOverrides } from "../lib/api";
 import { Modal } from "./Modal";
@@ -304,17 +304,25 @@ export function OverridesModal({ item, onClose, onNotify }: Props) {
   const formatTitle = mode === "json" ? "json" : (mode === "clash" ? "clash/yml" : "raw");
 
   return (
-    <Modal onClose={onClose} title={`Overrides: ${item.title}`} showCloseButton>
-      <div className="status">
-        Режим редактора: {formatTitle}. Overrides сохраняются во внутреннем формате и применяются перед рендером ответа.
-      </div>
-      <div className="status">
-        Версия: {overrideVersion} {loading ? "· загрузка..." : ""}
-      </div>
+    <Modal
+      onClose={onClose}
+      title={`Overrides: ${item.title}`}
+      showCloseButton
+      lead={`Режим редактора: ${formatTitle}. Overrides сохраняются во внутреннем формате и применяются перед рендером ответа.`}
+      footer={(
+        <>
+          <Button tone="primary" onClick={() => void saveOverrides()}>Сохранить overrides</Button>
+          <Button onClick={() => void renderPreview()}>
+            {previewLoading ? "Обновление превью..." : "Показать превью"}
+          </Button>
+          <span className="modal-footer-note">Версия: {overrideVersion}{loading ? " · загрузка…" : ""}</span>
+        </>
+      )}
+    >
 
       <section className="overrides-layout">
         <div className="overrides-pane">
-          <h3 className="editor-heading">Узлы</h3>
+          <div className="form-section-title">Узлы</div>
           <label className="composer-label">`nodes.byName` (JSON)</label>
           <Textarea
             rows={8}
@@ -333,7 +341,7 @@ export function OverridesModal({ item, onClose, onNotify }: Props) {
 
         {mode === "clash" ? (
           <div className="overrides-pane">
-            <h3 className="editor-heading">Clash</h3>
+            <div className="form-section-title">Clash</div>
             <label className="composer-label">`topology.proxyGroups.byName` (JSON)</label>
             <Textarea
               rows={8}
@@ -360,7 +368,7 @@ export function OverridesModal({ item, onClose, onNotify }: Props) {
 
         {mode === "json" ? (
           <div className="overrides-pane">
-            <h3 className="editor-heading">JSON / Xray</h3>
+            <div className="form-section-title">JSON / Xray</div>
             <label className="composer-label">`topology.balancers.byTag` (JSON)</label>
             <Textarea
               rows={7}
@@ -393,7 +401,7 @@ export function OverridesModal({ item, onClose, onNotify }: Props) {
         ) : null}
 
         <div className="overrides-pane">
-          <h3 className="editor-heading">JSON Fallback</h3>
+          <div className="form-section-title">JSON Fallback</div>
           <div className="composer-meta-hint">
             Debug-режим: можно редактировать весь объект overrides вручную. После изменения нажми "Применить JSON в форму".
           </div>
@@ -404,20 +412,11 @@ export function OverridesModal({ item, onClose, onNotify }: Props) {
             placeholder="{}"
           />
           <div className="toolbar">
-            <Button className="btn" onClick={applyJsonToStructuredDrafts}>Применить JSON в форму</Button>
-            <Button className="btn" onClick={resetStructuredDrafts}>Очистить форму</Button>
+            <Button onClick={applyJsonToStructuredDrafts}>Применить JSON в форму</Button>
+            <Button onClick={resetStructuredDrafts}>Очистить форму</Button>
           </div>
         </div>
       </section>
-
-      <div className="toolbar">
-        <Button className="btn" tone="primary" onClick={() => void saveOverrides()}>
-          Сохранить overrides
-        </Button>
-        <Button className="btn" onClick={() => void renderPreview()}>
-          {previewLoading ? "Обновление превью..." : "Показать превью"}
-        </Button>
-      </div>
 
       {preview ? (
         <section className="overrides-preview">

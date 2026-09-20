@@ -10,9 +10,12 @@ import {
   PUBLIC_BASE_URL,
   SYNC_API_TOKEN,
   STATIC_FILES,
+  OUTPUT_DEFAULT,
   normalizeOutput,
 } from "./config.js";
 import { renderHomePage } from "./home-page.js";
+import { renderAccessNotice } from "./access-notice.js";
+import { PING_MODES, pingTargets } from "./ping.js";
 import {
   PARAM_KEYS,
   sanitizeParams,
@@ -34,6 +37,7 @@ import {
   replaceShortLinkAccess,
   setFavoritesRow,
   recordShortLinkUserVisit,
+  collectUsageStats,
   listShortLinkUsers,
   updateShortLinkUserPolicy,
   setShortLinkUserBlocked,
@@ -45,6 +49,14 @@ import {
   upsertSubscriptionOverrides,
   exportSyncBundle,
   importSyncBundle,
+  listAllShortLinkRows,
+  listSyncPeers,
+  getSyncPeer,
+  getSyncPeerWithToken,
+  createSyncPeer,
+  updateSyncPeer,
+  deleteSyncPeer,
+  recordSyncPeerRun,
 } from "./sqlite-store.js";
 import {
   createMockSource,
@@ -68,6 +80,8 @@ import {
   pickUserAgentProfile,
   resolveAppKeyFromUserAgent,
   resolveOutputFromUserAgent,
+  previewMergeItems,
+  buildNormalizedModelFromSource,
   resolveLocalSourcePath,
   resolveRequestConfig,
   produceOutput,
@@ -85,6 +99,8 @@ import {
 import {
   createLocalSource,
   createMergedSource,
+  updateMergedSource,
+  getMergedSource,
   getLocalSource,
 } from "./local-sources.js";
 import { getAppsCatalog, getAppGuide } from "./apps-catalog.js";
@@ -220,21 +236,70 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-function sendAuthProblem(res, status, title, message, extraHeaders = {}) {
+/** Страница с короткой человеческой ошибкой: одна карточка и необязательная кнопка. */
+function renderProblemPage(title, message, action = null) {
+  const button = action
+    ? `<a class="btn" href="${escapeHtml(action.href)}">${escapeHtml(action.label)}</a>`
+    : "";
+  return `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f1ec; --surface: #fff; --line: rgba(35,28,21,.1);
+    --ink: #1c1917; --muted: #6d665d; --accent: #c25a35;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131211; --surface: #1d1b19; --line: rgba(240,228,214,.12); --ink: #f0ebe4; --muted: #a49c92; --accent: #e08a5f; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100svh; display: grid; place-items: center;
+    padding: 24px; background: var(--bg); color: var(--ink);
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.55;
+  }
+  .card {
+    width: min(460px, 100%); padding: 28px;
+    border: 1px solid var(--line); border-radius: 18px; background: var(--surface);
+    box-shadow: 0 18px 44px rgba(31,25,18,.1);
+  }
+  h1 { margin: 0 0 8px; font-size: 21px; letter-spacing: -.02em; }
+  p { margin: 0 0 18px; color: var(--muted); font-size: 14px; white-space: pre-wrap; }
+  p:last-child { margin-bottom: 0; }
+  a.btn {
+    display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 16px;
+    border-radius: 13px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; text-decoration: none;
+  }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(message)}</p>
+    ${button}
+  </main>
+</body>
+</html>`;
+}
+
+function sendProblemPage(res, status, title, message, extraHeaders = {}, action = null) {
   res.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     ...extraHeaders,
   });
-  res.end(`<!doctype html>
-<html lang="ru">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;line-height:1.5">
-  <h1>${escapeHtml(title)}</h1>
-  <p>${escapeHtml(message)}</p>
-  <p><a href="/auth/start?return=/">Попробовать войти снова</a></p>
-</body>
-</html>`);
+  res.end(renderProblemPage(title, message, action));
+}
+
+function sendAuthProblem(res, status, title, message, extraHeaders = {}) {
+  sendProblemPage(res, status, title, message, extraHeaders, {
+    href: "/auth/start?return=/",
+    label: "Попробовать войти снова",
+  });
 }
 
 function cookieValue(name, value, { maxAge, expires, httpOnly = true } = {}) {
@@ -970,6 +1035,74 @@ function humanBytes(bytes) {
   return `${size >= 100 ? size.toFixed(0) : size.toFixed(2)} ${units[idx]}`;
 }
 
+/**
+ * Пинг серверов подписки.
+ *
+ * Клиента протоколов у панели нет, поэтому меряем то же, что меряет телефон до
+ * поднятия туннеля: DNS, TCP-рукопожатие и TLS до самой точки входа. Этого
+ * хватает, чтобы понять, жив ли сервер и далеко ли он, — но это не скорость
+ * внутри туннеля.
+ */
+async function handlePing(req, res) {
+  try {
+    const body = await readJsonBody(req, 1024 * 1024);
+    const mode = String(body?.mode || "tcp");
+    const attempts = Number(body?.attempts || 1);
+    const timeoutMs = Number(body?.timeoutMs || 3000);
+
+    let targets = Array.isArray(body?.targets) ? body.targets : [];
+    if (targets.length === 0) {
+      const params = {};
+      const source = body && typeof body.params === "object" && !Array.isArray(body.params) ? body.params : {};
+      for (const key of [...PARAM_KEYS, "endpoint"]) {
+        if (source[key] === undefined || source[key] === null) continue;
+        params[key] = String(source[key]).trim();
+      }
+      if (!params.sub_url) {
+        sendJson(res, 400, { ok: false, error: "sub_url or targets are required" });
+        return;
+      }
+      const requestUrl = new URL("http://localhost/sub");
+      for (const [k, v] of Object.entries(params)) {
+        if (v) requestUrl.searchParams.set(k, v);
+      }
+      const config = resolveRequestConfig(requestUrl, {});
+      if (!config.ok) {
+        sendJson(res, config.status || 400, { ok: false, error: config.error || "invalid request" });
+        return;
+      }
+      const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
+      const normalized = buildNormalizedModelFromSource(
+        fetched.body,
+        fetched.responseHeaders?.["content-type"] || "",
+      );
+      targets = [];
+      for (const entry of normalized.model.entries) {
+        if (entry.enabled === false) continue;
+        for (const node of entry.nodes) {
+          if (!node.endpoint?.host) continue;
+          targets.push({
+            id: node.id || `${entry.id}:${targets.length}`,
+            name: node.name || entry.name,
+            host: node.endpoint.host,
+            port: node.endpoint.port || 443,
+            sni: node.security?.sni || "",
+          });
+        }
+      }
+    }
+
+    const result = await pingTargets({ targets, mode, attempts, timeoutMs });
+    if (!result.ok) {
+      sendJson(res, result.status || 400, result);
+      return;
+    }
+    sendJson(res, 200, result);
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "ping failed" });
+  }
+}
+
 async function handleSubscriptionTest(req, res) {
   try {
     const body = await readJsonBody(req, 1024 * 1024);
@@ -1358,6 +1491,41 @@ async function handleCreateLocalSource(req, res) {
   }
 }
 
+async function handleGetMergedSource(req, res, id) {
+  const found = getMergedSource(id);
+  if (!found.ok) {
+    sendJson(res, found.status || 404, found);
+    return;
+  }
+  sendJson(res, 200, { ok: true, source: found.source, subUrl: `merge:${found.source.id}` });
+}
+
+async function handleUpdateMergedSource(req, res, id) {
+  try {
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const updated = updateMergedSource(id, body || {});
+    if (!updated.ok) {
+      sendJson(res, updated.status || 400, updated);
+      return;
+    }
+    sendJson(res, 200, { ok: true, source: updated.source, subUrl: `merge:${updated.source.id}` });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
+  }
+}
+
+/** Имена серверов каждого источника — для проверки регулярок в окне объединения. */
+async function handlePreviewMergedSource(req, res) {
+  try {
+    const body = await readJsonBody(req, 2 * 1024 * 1024);
+    const items = Array.isArray(body?.items) ? body.items.slice(0, 40) : [];
+    const results = await previewMergeItems(items);
+    sendJson(res, 200, { ok: true, results });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
+  }
+}
+
 async function handleCreateMergedSource(req, res) {
   try {
     const body = await readJsonBody(req, 2 * 1024 * 1024);
@@ -1611,6 +1779,24 @@ function resolveShortLinkTypeOverride(reqUrl) {
   return "";
 }
 
+/**
+ * Формат, в котором короткая ссылка отдаёт подписку прямо сейчас.
+ *
+ * Повторяет выбор обычного резолва: `?type=` сильнее всего, дальше сохранённый
+ * в ссылке формат, а при `output_auto` формат подбирается по User-Agent.
+ * Нужен до похода в апстрим — чтобы ответ-заглушку отдать в том же виде,
+ * которого ждёт приложение.
+ */
+function resolveShortLinkOutput(req, reqUrl, params, typeOverride) {
+  if (typeOverride) return normalizeOutput(typeOverride) || OUTPUT_DEFAULT;
+  const stored = normalizeOutput(String(params?.output || "")) || OUTPUT_DEFAULT;
+  const autoRaw = String(params?.output_auto || "").trim().toLowerCase();
+  const auto = autoRaw === "1" || autoRaw === "true" || autoRaw === "yes" || autoRaw === "on";
+  const userAgent = String(firstHeaderString(req.headers["user-agent"]) || "").trim();
+  if (!auto || !userAgent) return stored;
+  return resolveOutputFromUserAgent(userAgent, stored).output || stored;
+}
+
 async function handleShortLinkResolve(req, res, id) {
   const found = await getPublicShortLink(id);
   if (!found.ok) {
@@ -1624,9 +1810,31 @@ async function handleShortLinkResolve(req, res, id) {
     const client = resolveRawClientInfo(req, reqUrl, found.link.params || {});
     const visit = await recordShortLinkUserVisit(found.link.id, client.hwid, client.info);
     if (!visit.ok && (visit.code === "blocked" || visit.code === "limit")) {
-      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(String(visit.message || "Доступ к подписке ограничен"));
+      const message = String(visit.message || "Доступ к подписке ограничен");
+      const typeOverride = resolveShortLinkTypeOverride(reqUrl);
+      // Браузеру показываем причину страницей, приложению — подпиской из одного
+      // узла: текст встанет именем сервера и человек прочитает его в клиенте.
+      if (!typeOverride && wantsHtmlSharePage(req)) {
+        sendProblemPage(res, 403, visit.code === "limit" ? "Лимит устройств" : "Доступ ограничен", message);
+        return;
+      }
+      const output = resolveShortLinkOutput(req, reqUrl, found.link.params || {}, typeOverride);
+      const notice = renderAccessNotice(message, output);
+      res.writeHead(200, { "Content-Type": notice.contentType, "Cache-Control": "no-store" });
+      res.end(notice.body);
       return;
+    }
+    // Ссылка с лимитом устройств без hwid бессмысленна: посчитать такое
+    // подключение не во что, и лимит обходится одним запросом без заголовка.
+    // Страницу подключения при этом не трогаем — её открывают из браузера,
+    // где hwid взяться неоткуда.
+    if (visit.skipped && visit.reason === "empty hwid" && Number(visit.policy?.maxUsers || 0) > 0) {
+      const typeOverride = resolveShortLinkTypeOverride(reqUrl);
+      if (typeOverride || !wantsHtmlSharePage(req)) {
+        const message = String(visit.policy?.blockedMessage || "Доступ к подписке ограничен");
+        sendProblemPage(res, 403, "Нужен идентификатор устройства", message);
+        return;
+      }
     }
   } catch (e) {
     console.error("[WARN] short-link user tracking failed:", e?.message || e);
@@ -1969,6 +2177,27 @@ async function handleAuthCallback(req, reqUrl, res) {
   }
 }
 
+/**
+ * Сводная статистика для страницы «Статистика».
+ *
+ * Выборка подписок совпадает со списком на главной: админ видит панель целиком,
+ * остальные — свои ссылки и выданные им доступы.
+ */
+async function handleStats(req, url, res) {
+  const state = await getAuthState(req);
+  if (!state.authenticated || !state.user) {
+    sendJson(res, 401, { ok: false, error: "unauthorized", authRequired: true });
+    return;
+  }
+  try {
+    const days = Number(url?.searchParams?.get("days") || 30);
+    const stats = await collectUsageStats(state.user, { days });
+    sendJson(res, 200, { ok: true, stats });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e?.message || "stats unavailable" });
+  }
+}
+
 async function handleAdminUsersList(req, res) {
   const state = await requireAdmin(req, res);
   if (!state) return;
@@ -2159,6 +2388,51 @@ async function resolveFavoritesAccountKey(req) {
   return "public";
 }
 
+/**
+ * Подписки остальных пользователей — только для админа.
+ *
+ * Открыть чужую ссылку админ мог и раньше, но в списке её не было: приходилось
+ * знать идентификатор. Отдаём такие записи отдельно и помечаем `foreign`, чтобы
+ * интерфейс по умолчанию их прятал и не выдавал за свои.
+ */
+async function foreignFavorites(req, actor, known) {
+  if (!actor || actor.role !== "admin") return [];
+  const username = String(actor.username || "").trim().toLowerCase();
+  const seen = new Set(
+    (Array.isArray(known) ? known : [])
+      .map((item) => String(item?.shortId || "").trim())
+      .filter(Boolean),
+  );
+  const links = await listAllShortLinkRows();
+  const out = [];
+  for (const link of links) {
+    if (!link?.id || seen.has(link.id)) continue;
+    const urls = shortLinkPublicUrls(req, link.id, link.params || {});
+    out.push({
+      title: link.title || link.id,
+      url: urls.shortUrl,
+      shortId: link.id,
+      hidden: Boolean(link.hidden),
+      tags: Array.isArray(link.tags) ? link.tags : [],
+      payload: link.params || {},
+      labels: [],
+      ts: Date.parse(link.updatedAt || link.createdAt || "") || 0,
+      // derived: в свой список такие записи не сохраняются, иначе чужая
+      // подписка осела бы у админа при первом же сохранении.
+      derived: true,
+      foreign: link.ownerUsername !== username,
+      ownerUsername: link.ownerUsername || "",
+      permissions: {
+        canView: true,
+        canEdit: true,
+        canManageAccess: true,
+        accessLevel: "edit",
+      },
+    });
+  }
+  return out;
+}
+
 async function handleFavoritesGet(req, res) {
   const key = await resolveFavoritesAccountKey(req);
   if (!key) {
@@ -2169,7 +2443,8 @@ async function handleFavoritesGet(req, res) {
   const actor = authActorFromState(state);
   const own = await filterFavoritesByAccess(await getFavoritesRow(key), actor);
   const shared = await grantedFavorites(req, actor, own);
-  sendJson(res, 200, { ok: true, favorites: [...own, ...shared] });
+  const foreign = await foreignFavorites(req, actor, [...own, ...shared]);
+  sendJson(res, 200, { ok: true, favorites: [...own, ...shared, ...foreign] });
 }
 
 async function handleFavoritesPut(req, res) {
@@ -2187,7 +2462,8 @@ async function handleFavoritesPut(req, res) {
     const own = incoming.filter((item) => !item?.derived);
     const saved = await setFavoritesRow(key, await filterFavoritesByAccess(own, actor));
     const shared = await grantedFavorites(req, actor, saved);
-    sendJson(res, 200, { ok: true, favorites: [...saved, ...shared] });
+    const foreign = await foreignFavorites(req, actor, [...saved, ...shared]);
+    sendJson(res, 200, { ok: true, favorites: [...saved, ...shared, ...foreign] });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "invalid request" });
   }
@@ -2251,7 +2527,8 @@ async function handleFavoritesRestore(req, res) {
     }
     const saved = await setFavoritesRow(key, await filterFavoritesByAccess(restored, actor));
     const shared = await grantedFavorites(req, actor, saved);
-    sendJson(res, 200, { ok: true, favorites: [...saved, ...shared], report });
+    const foreign = await foreignFavorites(req, actor, [...saved, ...shared]);
+    sendJson(res, 200, { ok: true, favorites: [...saved, ...shared, ...foreign], report });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "restore failed" });
   }
@@ -2287,6 +2564,222 @@ async function handleSyncImport(req, res) {
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e?.message || "sync import failed" });
   }
+}
+
+/**
+ * Забрать выгрузку с удалённой установки.
+ *
+ * Токен уезжает заголовком, а не в адресе: ссылки попадают в логи прокси,
+ * а секрету там не место.
+ */
+async function fetchRemoteBundle({ remoteUrl, remoteToken, profiles = true, timeoutMs = 120000 }) {
+  const remote = normalizeRemoteSyncUrl(remoteUrl);
+  const token = String(remoteToken || "").trim();
+  if (!token) throw new Error("remoteToken is required");
+  const exportUrl = new URL(remote.toString());
+  exportUrl.pathname = `${exportUrl.pathname}/api/sync/export`.replace(/\/{2,}/g, "/");
+  if (!profiles) exportUrl.searchParams.set("profiles", "0");
+  const resp = await fetch(exportUrl, {
+    method: "GET",
+    headers: {
+      "Accept": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const json = await resp.json().catch(() => null);
+  if (!resp.ok || !json?.ok || !json?.bundle) {
+    const error = new Error(json?.error || `remote sync export failed (${resp.status})`);
+    error.status = resp.status && resp.status >= 400 ? resp.status : 502;
+    throw error;
+  }
+  return { remote, bundle: json.bundle };
+}
+
+/** Что лежит в выгрузке — показываем до импорта, чтобы проверка была нагляднее. */
+function summarizeSyncBundle(bundle) {
+  const data = bundle?.data && typeof bundle.data === "object" ? bundle.data : {};
+  const out = {};
+  for (const key of ["shortLinks", "access", "favorites", "userPolicies", "linkUsers", "userHistory", "subscriptionOverrides", "profileFiles"]) {
+    if (Array.isArray(data[key])) out[key] = data[key].length;
+  }
+  return out;
+}
+
+const syncPeerRunning = new Set();
+
+/**
+ * Один прогон синхронизации с пиром.
+ *
+ * Связь односторонняя: мы забираем и накатываем, удалённая установка об этом
+ * не знает и ничего у себя не меняет.
+ */
+async function runSyncPeer(peer, { dryRun = false } = {}) {
+  if (!peer?.id) throw new Error("peer not found");
+  if (syncPeerRunning.has(peer.id)) throw new Error("синхронизация с этим сервером уже идёт");
+  syncPeerRunning.add(peer.id);
+  try {
+    const { remote, bundle } = await fetchRemoteBundle({
+      remoteUrl: peer.remoteUrl,
+      remoteToken: peer.remoteToken,
+      profiles: peer.includeProfiles,
+    });
+    const imported = await importSyncBundle(bundle, { dryRun });
+    const report = { ...imported, available: summarizeSyncBundle(bundle), exportedAt: bundle?.exportedAt || "" };
+    const saved = await recordSyncPeerRun(peer.id, {
+      status: dryRun ? "dry-run" : "ok",
+      error: "",
+      report,
+      synced: !dryRun,
+    });
+    return { ok: true, peer: saved, remoteUrl: remote.origin, imported, report, dryRun };
+  } catch (e) {
+    const message = e?.message || "sync failed";
+    const saved = await recordSyncPeerRun(peer.id, { status: "error", error: message });
+    const error = new Error(message);
+    error.status = e?.status || 502;
+    error.peer = saved;
+    throw error;
+  } finally {
+    syncPeerRunning.delete(peer.id);
+  }
+}
+
+async function handleListSyncPeers(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+  try {
+    sendJson(res, 200, { ok: true, peers: await listSyncPeers(), syncApiEnabled: Boolean(SYNC_API_TOKEN) });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e?.message || "failed to list peers" });
+  }
+}
+
+async function handleCreateSyncPeer(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    sendJson(res, 200, { ok: true, peer: await createSyncPeer(body) });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to create peer" });
+  }
+}
+
+async function handleUpdateSyncPeer(req, res, id) {
+  if (!(await requireAdmin(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    const peer = await updateSyncPeer(id, body);
+    if (!peer) {
+      sendJson(res, 404, { ok: false, error: "peer not found" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, peer });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to update peer" });
+  }
+}
+
+async function handleDeleteSyncPeer(req, res, id) {
+  if (!(await requireAdmin(req, res))) return;
+  try {
+    await deleteSyncPeer(id);
+    sendJson(res, 200, { ok: true });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "failed to delete peer" });
+  }
+}
+
+/**
+ * Проверка связи до сохранения пира.
+ *
+ * Ничего не импортирует: только сообщает, ответила ли удалённая установка и
+ * что в её выгрузке лежит.
+ */
+async function handleTestSyncPeer(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    let remoteUrl = String(body?.remoteUrl || body?.remote_url || "").trim();
+    let remoteToken = String(body?.remoteToken || body?.remote_token || "").trim();
+    const peerId = String(body?.id || "").trim();
+    if (peerId) {
+      const stored = await getSyncPeerWithToken(peerId);
+      if (!stored) {
+        sendJson(res, 404, { ok: false, error: "peer not found" });
+        return;
+      }
+      if (!remoteUrl) remoteUrl = stored.remoteUrl;
+      if (!remoteToken) remoteToken = stored.remoteToken;
+    }
+    const { remote, bundle } = await fetchRemoteBundle({ remoteUrl, remoteToken, profiles: false, timeoutMs: 30000 });
+    sendJson(res, 200, {
+      ok: true,
+      remoteUrl: remote.origin,
+      exportedAt: bundle?.exportedAt || "",
+      available: summarizeSyncBundle(bundle),
+    });
+  } catch (e) {
+    sendJson(res, e?.status && e.status >= 400 && e.status < 600 ? e.status : 400, {
+      ok: false,
+      error: e?.message || "sync test failed",
+    });
+  }
+}
+
+async function handleRunSyncPeer(req, res, id) {
+  if (!(await requireAdmin(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 256 * 1024).catch(() => ({}));
+    const peer = await getSyncPeerWithToken(id);
+    if (!peer) {
+      sendJson(res, 404, { ok: false, error: "peer not found" });
+      return;
+    }
+    const result = await runSyncPeer(peer, { dryRun: Boolean(body?.dryRun) });
+    sendJson(res, 200, result);
+  } catch (e) {
+    sendJson(res, e?.status && e.status >= 400 && e.status < 600 ? e.status : 400, {
+      ok: false,
+      error: e?.message || "sync failed",
+      peer: e?.peer || null,
+    });
+  }
+}
+
+/**
+ * Расписание: раз в минуту смотрим, кому пора.
+ *
+ * Интервал считаем от последней попытки, а не от успеха — иначе упавший пир
+ * долбился бы на каждом тике.
+ */
+function startSyncPeerScheduler() {
+  const tick = async () => {
+    let peers = [];
+    try {
+      peers = await listSyncPeers();
+    } catch {
+      return;
+    }
+    const now = Date.now();
+    for (const peer of peers) {
+      if (!peer.enabled || peer.intervalMinutes <= 0) continue;
+      if (syncPeerRunning.has(peer.id)) continue;
+      const last = Date.parse(peer.lastAttemptAt || "") || 0;
+      if (last && now - last < peer.intervalMinutes * 60000) continue;
+      try {
+        const full = await getSyncPeerWithToken(peer.id);
+        if (!full) continue;
+        const result = await runSyncPeer(full, {});
+        console.log(`[INFO] синхронизация с ${peer.remoteUrl}: ${JSON.stringify(result.imported)}`);
+      } catch (e) {
+        console.log(`[WARN] синхронизация с ${peer.remoteUrl} не удалась: ${e?.message || e}`);
+      }
+    }
+  };
+  const timer = setInterval(() => { void tick(); }, 60000);
+  if (typeof timer.unref === "function") timer.unref();
+  const first = setTimeout(() => { void tick(); }, 15000);
+  if (typeof first.unref === "function") first.unref();
 }
 
 async function handleSyncPull(req, res) {
@@ -2342,10 +2835,13 @@ const server = http.createServer(async (req, res) => {
   const shortUsersApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users$/);
   const shortUserApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users\/([^/]+)$/);
   const localSourceApiMatch = routePath.match(/^\/api\/local-sources\/([A-Za-z0-9_-]+)$/);
+  const mergedSourceApiMatch = routePath.match(/^\/api\/merged-sources\/([A-Za-z0-9_-]+)$/);
   const mockApiMatch = routePath.match(/^\/api\/mock-sources\/([A-Za-z0-9_-]+)$/);
   const mockLogsMatch = routePath.match(/^\/api\/mock-sources\/([A-Za-z0-9_-]+)\/logs$/);
   const adminUserApiMatch = routePath.match(/^\/api\/admin\/users\/([a-zA-Z0-9._-]+)$/);
   const mockResolveMatch = routePath.match(/^\/mock\/([A-Za-z0-9_-]+)$/);
+  const syncPeerApiMatch = routePath.match(/^\/api\/sync\/peers\/([A-Za-z0-9-]+)$/);
+  const syncPeerRunApiMatch = routePath.match(/^\/api\/sync\/peers\/([A-Za-z0-9-]+)\/pull$/);
 
   if (req.method === "GET" && routePath === "/api/auth/me") {
     await handleAuthMe(req, res);
@@ -2365,6 +2861,30 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "POST" && routePath === "/api/auth/logout") {
     await handleAuthLogout(req, res);
+    return;
+  }
+  if (req.method === "GET" && routePath === "/api/sync/peers") {
+    await handleListSyncPeers(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/sync/peers") {
+    await handleCreateSyncPeer(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/sync/peers/test") {
+    await handleTestSyncPeer(req, res);
+    return;
+  }
+  if (req.method === "POST" && syncPeerRunApiMatch) {
+    await handleRunSyncPeer(req, res, syncPeerRunApiMatch[1]);
+    return;
+  }
+  if (req.method === "PUT" && syncPeerApiMatch) {
+    await handleUpdateSyncPeer(req, res, syncPeerApiMatch[1]);
+    return;
+  }
+  if (req.method === "DELETE" && syncPeerApiMatch) {
+    await handleDeleteSyncPeer(req, res, syncPeerApiMatch[1]);
     return;
   }
   if (req.method === "GET" && routePath === "/api/sync/export") {
@@ -2398,6 +2918,10 @@ const server = http.createServer(async (req, res) => {
     await handleSearchByTag(req, url, res);
     return;
   }
+  if (req.method === "GET" && routePath === "/api/stats") {
+    await handleStats(req, url, res);
+    return;
+  }
   if (req.method === "GET" && routePath === "/api/admin/users") {
     await handleAdminUsersList(req, res);
     return;
@@ -2425,6 +2949,25 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const start = authStartLocation(req, "/");
+      redirect(res, start.location, { "Set-Cookie": [start.cookie, ...clearSessionCookies()] });
+      return;
+    }
+    if (!serveFrontendIndex(res)) {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(renderHomePage());
+    }
+    return;
+  }
+  if (req.method === "GET" && routePath === "/stats") {
+    const state = await getAuthState(req);
+    if (!state.authenticated) {
+      if (state.denied) {
+        sendAuthProblem(res, 403, "Нет доступа к Sub Lab", "В account для этой учётной записи не назначена роль sub_mirror.", {
+          "Set-Cookie": clearSessionCookies(),
+        });
+        return;
+      }
+      const start = authStartLocation(req, "/stats");
       redirect(res, start.location, { "Set-Cookie": [start.cookie, ...clearSessionCookies()] });
       return;
     }
@@ -2536,6 +3079,16 @@ const server = http.createServer(async (req, res) => {
     void handleSubscriptionTest(req, res);
     return;
   }
+  if (req.method === "POST" && routePath === "/api/ping") {
+    if (!(await requireApiAuth(req, res))) return;
+    await handlePing(req, res);
+    return;
+  }
+  if (req.method === "GET" && routePath === "/api/ping/modes") {
+    if (!(await requireApiAuth(req, res))) return;
+    sendJson(res, 200, { ok: true, modes: PING_MODES });
+    return;
+  }
   if (req.method === "POST" && routePath === "/api/local-sources") {
     if (!(await requireEditorAuth(req, res))) return;
     void handleCreateLocalSource(req, res);
@@ -2544,6 +3097,21 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && routePath === "/api/merged-sources") {
     if (!(await requireEditorAuth(req, res))) return;
     void handleCreateMergedSource(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/merged-sources/preview") {
+    if (!(await requireEditorAuth(req, res))) return;
+    await handlePreviewMergedSource(req, res);
+    return;
+  }
+  if (req.method === "GET" && mergedSourceApiMatch) {
+    if (!(await requireEditorAuth(req, res))) return;
+    await handleGetMergedSource(req, res, mergedSourceApiMatch[1]);
+    return;
+  }
+  if (req.method === "PUT" && mergedSourceApiMatch) {
+    if (!(await requireEditorAuth(req, res))) return;
+    await handleUpdateMergedSource(req, res, mergedSourceApiMatch[1]);
     return;
   }
   if (req.method === "POST" && routePath === "/api/import/parse") {
@@ -2686,10 +3254,23 @@ const server = http.createServer(async (req, res) => {
   res.end("not found");
 });
 
+/**
+ * Глобальный fetch появился в Node 18. На Node 16 сервер поднимался как ни в
+ * чём не бывало и падал только при загрузке подписки («fetch is not defined»),
+ * поэтому требование проверяем на старте.
+ */
+function requireModernNode() {
+  if (typeof fetch === "function") return;
+  console.error(`[FATAL] нужен Node 18 или новее, запущен ${process.version}`);
+  process.exit(1);
+}
+
 function startServer() {
+  requireModernNode();
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`[OK] listening on :${PORT}`);
   });
+  startSyncPeerScheduler();
   return server;
 }
 
@@ -2716,5 +3297,8 @@ export {
   resolveShortLinkTypeOverride,
   produceOutput,
   fetchWithNode,
+  fetchRemoteBundle,
+  summarizeSyncBundle,
+  foreignFavorites,
   startServer,
 };

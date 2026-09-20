@@ -1,14 +1,15 @@
+# Node берём из официального образа на том же Alpine 3.16, что и subconverter:
+# в репозиториях 3.16 лежит Node 16, у которого нет глобального fetch — на нём
+# молча ломается загрузка подписок. Свой musl, openssl 1.1 и сам subconverter
+# остаются на месте, переносится только бинарник Node.
+FROM node:18-alpine3.16 AS node
 FROM tindy2013/subconverter:latest
 
 WORKDIR /app
 
-RUN if command -v apk >/dev/null 2>&1; then \
-      apk add --no-cache nodejs-current npm || apk add --no-cache nodejs npm; \
-    elif command -v apt-get >/dev/null 2>&1; then \
-      apt-get update && apt-get install -y --no-install-recommends nodejs npm && rm -rf /var/lib/apt/lists/*; \
-    else \
-      echo "No supported package manager found to install Node.js" && exit 1; \
-    fi \
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && if [ -f /base/pref.example.toml ]; then \
       cp /base/pref.example.toml /base/pref.toml; \
       sed -i 's/^listen = .*/listen = \"0.0.0.0\"/' /base/pref.toml; \

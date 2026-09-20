@@ -9,10 +9,19 @@ import type {
   ShortLinkPermissions,
   ShortLinkUsersData,
   SubTestResponse,
+  MergeItem,
+  MergeOnEmpty,
+  MergedSource,
+  MergePreviewResult,
+  PingMode,
+  PingResponse,
+  PingResult,
+  UsageStats,
+  UsageStatsTotals,
   SubscriptionPayload,
   UACatalog,
 } from "../types";
-import type { FavoriteItem } from "../types";
+import type { FavoriteItem, SyncPeer, SyncPeerInput, SyncPeerTestResult } from "../types";
 
 const PARAM_KEYS = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups", "nodes"] as const;
 
@@ -35,7 +44,10 @@ function rewriteUrlToBrowserOrigin(raw: string): string {
     if (isLocalHostname(browserUrl.hostname)) return value;
     const parsed = new URL(value, browserOrigin);
     parsed.protocol = browserUrl.protocol;
-    parsed.host = browserUrl.host;
+    // hostname и port по отдельности: сеттер `host` без явного порта старый
+    // порт не убирает, и ссылка на домен уезжала бы как sub.example.com:4192.
+    parsed.hostname = browserUrl.hostname;
+    parsed.port = browserUrl.port;
     return parsed.toString();
   } catch {
     return value;
@@ -257,7 +269,31 @@ export async function fetchLocalSource(id: string): Promise<{ id: string; subUrl
   };
 }
 
-export async function createMergedSource(input: { name?: string; items: SubscriptionPayload[] }): Promise<{ id: string; subUrl: string }> {
+function normalizeMergedSource(raw: unknown, fallbackId = ""): MergedSource {
+  const source = (raw || {}) as Partial<MergedSource>;
+  return {
+    id: String(source.id || fallbackId),
+    name: String(source.name || ""),
+    items: (Array.isArray(source.items) ? source.items : []).map((item) => {
+      const row = (item || {}) as MergeItem;
+      return {
+        ...row,
+        title: String(row.title || ""),
+        shortId: String(row.shortId || ""),
+        filter: {
+          pattern: String(row.filter?.pattern || ""),
+          onEmpty: (["all", "skip", "error"].includes(String(row.filter?.onEmpty))
+            ? row.filter?.onEmpty
+            : "all") as MergeOnEmpty,
+        },
+      };
+    }),
+    createdAt: String(source.createdAt || ""),
+    updatedAt: String(source.updatedAt || ""),
+  };
+}
+
+export async function createMergedSource(input: { name?: string; items: MergeItem[] }): Promise<{ id: string; subUrl: string; source: MergedSource }> {
   const resp = await fetch("/api/merged-sources", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -268,7 +304,45 @@ export async function createMergedSource(input: { name?: string; items: Subscrip
   return {
     id: String(json.source?.id || ""),
     subUrl: String(json.subUrl || ""),
+    source: normalizeMergedSource(json.source),
   };
+}
+
+export async function fetchMergedSource(id: string): Promise<MergedSource> {
+  const resp = await fetch(`/api/merged-sources/${encodeURIComponent(id)}`);
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "merged source fetch failed");
+  return normalizeMergedSource(json.source, id);
+}
+
+export async function updateMergedSource(id: string, input: { name?: string; items: MergeItem[] }): Promise<MergedSource> {
+  const resp = await fetch(`/api/merged-sources/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input || {}),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "merged source update failed");
+  return normalizeMergedSource(json.source, id);
+}
+
+/** Имена серверов каждого источника — чтобы окно объединения проверяло регулярки без сети. */
+export async function previewMergeItems(items: MergeItem[]): Promise<MergePreviewResult[]> {
+  const resp = await fetch("/api/merged-sources/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "merge preview failed");
+  return (Array.isArray(json.results) ? json.results : []).map((row: unknown) => {
+    const item = (row || {}) as Partial<MergePreviewResult>;
+    return {
+      ok: Boolean(item.ok),
+      error: String(item.error || ""),
+      names: (Array.isArray(item.names) ? item.names : []).map((name: unknown) => String(name || "")),
+    };
+  });
 }
 
 export async function parseBulkImport(text: string): Promise<ImportedProxyItem[]> {
@@ -746,4 +820,201 @@ export async function saveFavorites(list: FavoriteItem[]): Promise<FavoriteItem[
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "favorites save failed");
   return Array.isArray(json.favorites) ? json.favorites.map(normalizeFavoriteEntry) : [];
+}
+
+export async function fetchUsageStats(days = 30): Promise<UsageStats> {
+  const resp = await fetch(`/api/stats?days=${encodeURIComponent(String(days))}`);
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "stats failed");
+  const stats = (json.stats || {}) as Partial<UsageStats>;
+  const totals = (stats.totals || {}) as Partial<UsageStatsTotals>;
+  const num = (value: unknown) => Math.max(0, Number(value || 0));
+  return {
+    days: num(stats.days) || days,
+    scope: stats.scope === "all" ? "all" : "own",
+    generatedAt: String(stats.generatedAt || ""),
+    totals: {
+      subscriptions: num(totals.subscriptions),
+      hiddenSubscriptions: num(totals.hiddenSubscriptions),
+      devices: num(totals.devices),
+      blockedDevices: num(totals.blockedDevices),
+      activeDevices24h: num(totals.activeDevices24h),
+      activeDevices7d: num(totals.activeDevices7d),
+      activeDevices30d: num(totals.activeDevices30d),
+      hits: num(totals.hits),
+      hitsPeriod: num(totals.hitsPeriod),
+      newDevicesPeriod: num(totals.newDevicesPeriod),
+    },
+    daily: (Array.isArray(stats.daily) ? stats.daily : []).map((row) => ({
+      day: String(row?.day || ""),
+      hits: num(row?.hits),
+      newDevices: num(row?.newDevices),
+    })),
+    byOs: (Array.isArray(stats.byOs) ? stats.byOs : []).map((row) => ({
+      label: String(row?.label || ""),
+      count: num(row?.count),
+    })),
+    byApp: (Array.isArray(stats.byApp) ? stats.byApp : []).map((row) => ({
+      label: String(row?.label || ""),
+      count: num(row?.count),
+    })),
+    topLinks: (Array.isArray(stats.topLinks) ? stats.topLinks : []).map((row) => ({
+      id: String(row?.id || ""),
+      title: String(row?.title || ""),
+      hits: num(row?.hits),
+      hitsPeriod: num(row?.hitsPeriod),
+      devices: num(row?.devices),
+      lastSeenAt: String(row?.lastSeenAt || ""),
+    })),
+    recentDevices: (Array.isArray(stats.recentDevices) ? stats.recentDevices : []).map((row) => ({
+      hwid: String(row?.hwid || ""),
+      shortLinkId: String(row?.shortLinkId || ""),
+      title: String(row?.title || ""),
+      os: String(row?.os || ""),
+      app: String(row?.app || ""),
+      deviceModel: String(row?.deviceModel || ""),
+      blocked: Boolean(row?.blocked),
+      firstSeenAt: String(row?.firstSeenAt || ""),
+      lastSeenAt: String(row?.lastSeenAt || ""),
+    })),
+  };
+}
+
+export async function pingSubscription(
+  params: SubscriptionPayload,
+  options: { mode?: PingMode; attempts?: number; timeoutMs?: number } = {},
+): Promise<PingResponse> {
+  const resp = await fetch("/api/ping", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      params,
+      mode: options.mode || "tcp",
+      attempts: options.attempts || 1,
+      timeoutMs: options.timeoutMs || 3000,
+    }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "ping failed");
+  const num = (value: unknown) => Math.max(0, Number(value || 0));
+  return {
+    mode: (["tcp", "tls", "dns"].includes(String(json.mode)) ? json.mode : "tcp") as PingMode,
+    attempts: num(json.attempts) || 1,
+    timeoutMs: num(json.timeoutMs) || 3000,
+    results: (Array.isArray(json.results) ? json.results : []).map((row: unknown) => {
+      const item = (row || {}) as Partial<PingResult>;
+      return {
+        id: String(item.id || ""),
+        name: String(item.name || ""),
+        host: String(item.host || ""),
+        port: num(item.port),
+        ok: Boolean(item.ok),
+        best: num(item.best),
+        worst: num(item.worst),
+        average: num(item.average),
+        loss: num(item.loss),
+        error: String(item.error || ""),
+      } as PingResult;
+    }),
+  };
+}
+
+function normalizeSyncPeer(entry: unknown): SyncPeer {
+  const row = (entry || {}) as Record<string, unknown>;
+  const report = row.lastReport && typeof row.lastReport === "object"
+    ? row.lastReport as Record<string, unknown>
+    : {};
+  return {
+    id: String(row.id || ""),
+    label: String(row.label || ""),
+    remoteUrl: String(row.remoteUrl || ""),
+    hasToken: Boolean(row.hasToken),
+    enabled: Boolean(row.enabled),
+    intervalMinutes: Number(row.intervalMinutes || 0),
+    includeProfiles: Boolean(row.includeProfiles),
+    lastStatus: String(row.lastStatus || ""),
+    lastError: String(row.lastError || ""),
+    lastReport: report,
+    lastSyncedAt: String(row.lastSyncedAt || ""),
+    lastAttemptAt: String(row.lastAttemptAt || ""),
+    createdAt: String(row.createdAt || ""),
+    updatedAt: String(row.updatedAt || ""),
+  };
+}
+
+/**
+ * Список подключённых установок.
+ *
+ * `syncApiEnabled` — про эту установку, а не про удалённые: без SYNC_API_TOKEN
+ * она сама отдавать выгрузку не станет, и подключиться к ней не выйдет.
+ */
+export async function listSyncPeers(): Promise<{ peers: SyncPeer[]; syncApiEnabled: boolean }> {
+  const resp = await fetch("/api/sync/peers");
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "sync peers fetch failed");
+  return {
+    peers: Array.isArray(json.peers) ? json.peers.map(normalizeSyncPeer) : [],
+    syncApiEnabled: Boolean(json.syncApiEnabled),
+  };
+}
+
+export async function createSyncPeer(input: SyncPeerInput): Promise<SyncPeer> {
+  const resp = await fetch("/api/sync/peers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "sync peer create failed");
+  return normalizeSyncPeer(json.peer);
+}
+
+export async function updateSyncPeer(id: string, input: SyncPeerInput): Promise<SyncPeer> {
+  const resp = await fetch(`/api/sync/peers/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "sync peer update failed");
+  return normalizeSyncPeer(json.peer);
+}
+
+export async function deleteSyncPeer(id: string): Promise<void> {
+  const resp = await fetch(`/api/sync/peers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "sync peer delete failed");
+}
+
+/** Проверка связи: импорта не делает, только сообщает, что лежит на той стороне. */
+export async function testSyncPeer(input: SyncPeerInput & { id?: string }): Promise<SyncPeerTestResult> {
+  const resp = await fetch("/api/sync/peers/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "sync peer test failed");
+  const available = json.available && typeof json.available === "object"
+    ? json.available as Record<string, number>
+    : {};
+  return {
+    remoteUrl: String(json.remoteUrl || ""),
+    exportedAt: String(json.exportedAt || ""),
+    available,
+  };
+}
+
+export async function runSyncPeer(id: string, options: { dryRun?: boolean } = {}): Promise<{ peer: SyncPeer; imported: Record<string, number> }> {
+  const resp = await fetch(`/api/sync/peers/${encodeURIComponent(id)}/pull`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dryRun: Boolean(options.dryRun) }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "sync failed");
+  return {
+    peer: normalizeSyncPeer(json.peer),
+    imported: json.imported && typeof json.imported === "object" ? json.imported as Record<string, number> : {},
+  };
 }

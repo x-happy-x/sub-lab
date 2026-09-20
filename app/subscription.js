@@ -26,6 +26,7 @@ import {
 } from "./config.js";
 import { resolveLocalSourceFilePath } from "./local-sources.js";
 import { getMergedSource } from "./local-sources.js";
+import { buildMergedResponseHeaders, dedupeServerNames, filterRawBody, nameFromRawLine, rawLines } from "./merge-source.js";
 import { parseBulkProxyText } from "./proxy-import.js";
 import {
   NODES_MODES,
@@ -150,7 +151,29 @@ async function decryptHappLink(subUrl) {
 
 function isHtml(s) {
   const t = s.trim().toLowerCase();
-  return t.startsWith("<!doctype html") || t.startsWith("<html");
+  return t.startsWith("<!doctype html") || t.startsWith("<html") || t.startsWith("<iframe");
+}
+
+/**
+ * Почему вместо подписки пришла страница.
+ *
+ * Провайдеры отдают HTML в двух совсем разных случаях: их антибот не пустил
+ * нас, или у них самих лежит бэкенд. Общее «anti-bot page» на оба случая
+ * уводило в неверную сторону — по нему нельзя понять, чинить заголовки или
+ * ждать провайдера.
+ */
+function describeHtmlResponse(rawText) {
+  const text = String(rawText || "");
+  const head = text.trim().slice(0, 600).toLowerCase();
+  const title = /<title>([^<]{1,120})<\/title>/i.exec(text)?.[1]?.trim();
+  const serverError = /\b(50[0234])\b/.exec(title || head)?.[1];
+  if (serverError) {
+    return `провайдер ответил страницей ${serverError}${title ? ` («${title}»)` : ""} — у него проблема на стороне сервера`;
+  }
+  if (/403|forbidden|access denied|доступ запрещ/i.test(title || head) || /ddos|cloudflare|mitigation|captcha|challenge/i.test(head)) {
+    return `провайдер вернул страницу защиты от ботов${title ? ` («${title}»)` : ""} — запрос не прошёл его фильтр`;
+  }
+  return `вместо подписки пришла HTML-страница${title ? ` («${title}»)` : ""}`;
 }
 
 function looksLikeUriListOrBase64(s) {
@@ -1751,35 +1774,109 @@ function buildRequestUrlFromParams(params) {
   return reqUrl;
 }
 
+/**
+ * Сборка объединённой подписки.
+ *
+ * Каждый источник тянется со своими заголовками и приводится к raw, затем из
+ * него отбираются серверы по регулярке записи. Заголовки источников сводятся
+ * в один `subscription-userinfo`: иначе приложение показало бы объединение как
+ * подписку без трафика и без срока.
+ */
+/**
+ * Сборка объединённой подписки.
+ *
+ * Каждый источник тянется со своими заголовками и приводится к raw, затем из
+ * него отбираются серверы по регулярке записи. Заголовки источников сводятся
+ * в один `subscription-userinfo`: иначе приложение показало бы объединение как
+ * подписку без трафика и без срока.
+ *
+ * Упавший источник не роняет объединение: провайдеры ложатся поодиночке, и
+ * терять из-за одного из них все остальные серверы — хуже, чем отдать
+ * неполный список. Ошибка возвращается, только если не собралось вообще
+ * ничего: отдавать пустую подписку нельзя, приложение сочтёт её сломанной и
+ * затрёт рабочий список.
+ */
 async function fetchMergedSource(mergeId) {
   const found = getMergedSource(mergeId);
   if (!found.ok) {
     throw new Error(found.error || "merged source not found");
   }
   const blocks = [];
+  const sourceHeaders = [];
+  const skipped = [];
+
   for (const item of found.source.items) {
+    const label = String(item?.title || item?.sub_url || "источник");
+    try {
+      const reqUrl = buildRequestUrlFromParams(item || {});
+      const config = resolveRequestConfig(reqUrl, {});
+      if (!config.ok) {
+        throw new Error(config.error || "неверные параметры источника");
+      }
+      const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
+      const produced = await produceOutput(fetched.body, OUTPUT_RAW, { app: config.app });
+      if (!produced.ok) {
+        throw new Error(produced.error || "источник не разобрался");
+      }
+      const selected = filterRawBody(produced.body, item?.filter, label);
+      sourceHeaders.push(fetched.responseHeaders || {});
+      blocks.push(...selected.lines);
+    } catch (e) {
+      skipped.push({ label, error: e?.message || String(e) });
+    }
+  }
+
+  if (blocks.length === 0) {
+    const details = skipped.map((row) => `${row.label}: ${row.error}`).join("; ");
+    throw new Error(details ? `ни один источник не отдал серверы (${details})` : "объединение пустое");
+  }
+  if (skipped.length > 0) {
+    console.warn(`[WARN] merge:${mergeId} пропущены источники: ${skipped.map((row) => `${row.label} (${row.error})`).join(", ")}`);
+  }
+
+  // Совпавшие имена разводим уже на собранном списке: повторы чаще приходят из
+  // разных источников, чем встречаются внутри одного.
+  return {
+    body: dedupeServerNames(blocks).join("\n"),
+    responseHeaders: buildMergedResponseHeaders(sourceHeaders, { title: found.source.name }),
+    responseStatus: 200,
+    responseUrl: `merge:${mergeId}`,
+    skipped,
+  };
+}
+
+/**
+ * Что даёт каждый источник объединения по отдельности.
+ *
+ * Нужно интерфейсу: там регулярку пишут вручную и хотят сразу видеть, какие
+ * серверы под неё попали. Имена считаем на сервере, а саму регулярку окно
+ * применяет у себя — тогда список обновляется без похода в сеть на каждый
+ * введённый символ.
+ */
+async function previewMergeItems(items) {
+  const list = Array.isArray(items) ? items : [];
+  const out = [];
+  for (const item of list) {
     const reqUrl = buildRequestUrlFromParams(item || {});
     const config = resolveRequestConfig(reqUrl, {});
     if (!config.ok) {
-      throw new Error(config.error || "invalid merged source item");
+      out.push({ ok: false, error: config.error || "invalid merge item", names: [] });
+      continue;
     }
-    const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
-    const produced = await produceOutput(fetched.body, OUTPUT_RAW, { app: config.app });
-    if (!produced.ok) {
-      throw new Error(produced.error || "failed to convert merged source item");
+    try {
+      const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
+      const produced = await produceOutput(fetched.body, OUTPUT_RAW, { app: config.app });
+      if (!produced.ok) {
+        out.push({ ok: false, error: produced.error || "failed to convert", names: [] });
+        continue;
+      }
+      const names = rawLines(produced.body).map((line) => nameFromRawLine(line) || line);
+      out.push({ ok: true, error: "", names });
+    } catch (e) {
+      out.push({ ok: false, error: e?.message || "fetch failed", names: [] });
     }
-    const lines = String(produced.body || "").trim();
-    if (lines) blocks.push(lines);
   }
-  const body = blocks.join("\n");
-  return {
-    body,
-    responseHeaders: {
-      "content-type": "text/plain; charset=utf-8",
-    },
-    responseStatus: 200,
-    responseUrl: `merge:${mergeId}`,
-  };
+  return out;
 }
 
 async function fetchWithNode(subUrl, forwardHeaders) {
@@ -1815,7 +1912,7 @@ async function produceOutput(rawText, output, options = {}) {
     return { ok: false, error: "empty response" };
   }
   if (isHtml(rawText)) {
-    return { ok: false, error: "got HTML (anti-bot page)" };
+    return { ok: false, error: describeHtmlResponse(rawText) };
   }
 
   if (output === OUTPUT_RAW_BASE64) {
@@ -1847,7 +1944,11 @@ async function produceOutput(rawText, output, options = {}) {
 
     const rawResult = await produceOutput(rawText, OUTPUT_RAW, options);
     if (!rawResult.ok) return rawResult;
-    const configs = buildJsonConfigBundleFromRaw(String(rawResult.body || ""));
+    // raw отдаёт подписку как есть, а провайдеры часто присылают её в base64.
+    // Для raw это нормально — клиент декодирует сам, — но собирать JSON из
+    // нераскодированной строки нечего: получался пустой список.
+    const rawBody = decodeBase64IfNeeded(String(rawResult.body || ""));
+    const configs = buildJsonConfigBundleFromRaw(rawBody);
     if (configs.length > 0) {
       return {
         ok: true,
@@ -1858,7 +1959,7 @@ async function produceOutput(rawText, output, options = {}) {
     }
     return {
       ok: true,
-      body: JSON.stringify(extractSubscriptionLines(rawResult.body), null, 2),
+      body: JSON.stringify(extractSubscriptionLines(rawBody), null, 2),
       contentType: "application/json; charset=utf-8",
       conversion: rawResult.conversion === "none-raw" ? "raw-json" : `${rawResult.conversion}+raw-json`,
     };
@@ -2066,7 +2167,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       writeStatus({
         ok: false,
         startedAt,
-        error: "got HTML (anti-bot page)",
+        error: describeHtmlResponse(raw),
         subUrl,
         output,
         profiles: profileNames,
@@ -2077,7 +2178,7 @@ async function handleSubscription(req, res, forcedProfileName = "") {
         responseHeaders: fetched.responseHeaders,
         sha1: sha1(raw),
       });
-      throw new Error("got HTML (anti-bot page)");
+      throw new Error(describeHtmlResponse(raw));
     }
 
     const produced = await produceOutput(raw, output, { app, clashGroups, nodesMode });
@@ -2441,6 +2542,7 @@ export {
   produceOutput,
   persistSuccessfulSourceSnapshot,
   fetchWithNode,
+  previewMergeItems,
   handleSubscription,
   handleLast,
   handleEcho,

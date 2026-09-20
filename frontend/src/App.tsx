@@ -12,6 +12,11 @@ import type {
   SubscriptionPayload,
   SubTestResponse,
   UACatalog,
+  UsageStats,
+  MergeItem,
+  MergePreviewResult,
+  PingMode,
+  PingResponse,
 } from "./types";
 import { readFavorites, writeFavorites } from "./lib/storage";
 import {
@@ -24,6 +29,10 @@ import {
   createShortLink,
   createLocalSource,
   createMergedSource,
+  fetchMergedSource,
+  updateMergedSource,
+  previewMergeItems,
+  pingSubscription,
   decryptHappSubscription,
   deleteProfile,
   fetchProfileCatalog,
@@ -32,6 +41,7 @@ import {
   fetchFavorites as fetchFavoritesRemote,
   restoreFavorites as restoreFavoritesRemote,
   fetchUaCatalog,
+  fetchUsageStats,
   fetchShortLink,
   fetchShortLinkAccess,
   fetchPublicShortLink,
@@ -58,14 +68,18 @@ import {
   type PublicShortMeta,
 } from "./lib/api";
 import { copyToClipboard } from "./lib/clipboard";
-import { FlaskIcon, ImportIcon, PlusIcon, ProfileIcon, CopyIcon, SaveIcon, SaveAsIcon, ThemeIcon, DiceIcon, TrashIcon } from "./icons";
+import { FlaskIcon, ImportIcon, PlusIcon, ProfileIcon, CopyIcon, SaveIcon, SaveAsIcon, ThemeIcon, DiceIcon, TrashIcon, ListIcon, ShieldIcon, ChartIcon, TestIcon, CloseIcon } from "./icons";
 import { SubscriptionCard } from "./components/SubscriptionCard";
+import { SyncPeersPanel } from "./components/SyncPeersPanel";
 import { Modal } from "./components/Modal";
-import { HeroHeader } from "./components/HeroHeader";
+import { AppShell, type ShellNavItem } from "./components/AppShell";
 import { UserMenu } from "./components/UserMenu";
 import { SharePanel } from "./components/SharePanel";
+import { StatsPage } from "./components/StatsPage";
+import { MergeModal, buildFavoriteDrafts, type MergeDraftItem } from "./components/MergeModal";
+import { PingModal } from "./components/PingModal";
 import { OverridesModal } from "./components/OverridesModal";
-import { Badge, Button, IconButton, NotificationToasts, TextInput, Textarea, Tooltip, type NotificationItem, type NotificationLevel } from "@x-happy-x/ui-kit";
+import { Badge, Button, IconButton, NotificationToasts, Segmented, TextInput, Textarea, Tooltip, type NotificationItem, type NotificationLevel } from "./ui";
 import subLabIcon from "./assets/sub-lab-icon.png";
 
 type TipButtonProps = ComponentProps<typeof Button> & {
@@ -79,9 +93,7 @@ type TipIconButtonProps = ComponentProps<typeof IconButton> & {
 function TipButton({ tip, ...props }: TipButtonProps) {
   return (
     <Tooltip content={tip}>
-      <span className="ui-tip-wrap">
-        <Button {...props} />
-      </span>
+      <Button {...props} />
     </Tooltip>
   );
 }
@@ -89,9 +101,7 @@ function TipButton({ tip, ...props }: TipButtonProps) {
 function TipIconButton({ tip, ...props }: TipIconButtonProps) {
   return (
     <Tooltip content={tip}>
-      <span className="ui-tip-wrap">
-        <IconButton {...props} />
-      </span>
+      <IconButton {...props} />
     </Tooltip>
   );
 }
@@ -103,11 +113,9 @@ type TipChipButtonProps = ComponentProps<"button"> & {
 function TipChipButton({ tip, className, children, ...props }: TipChipButtonProps) {
   return (
     <Tooltip content={tip}>
-      <span className="ui-tip-wrap">
-        <button type="button" className={className} title={tip} {...props}>
-          {children}
-        </button>
-      </span>
+      <button type="button" className={className} {...props}>
+        {children}
+      </button>
     </Tooltip>
   );
 }
@@ -117,7 +125,9 @@ function defaultPayload(): SubscriptionPayload {
     endpoint: "last",
     sub_url: "",
     output: "yml",
-    output_auto: "",
+    // Авто включено по умолчанию: формат почти всегда надёжнее выбрать по
+    // User-Agent клиента, чем угадывать руками при создании подписки.
+    output_auto: "1",
     app: "flclashx",
     device: "windows",
     profile: "",
@@ -150,6 +160,14 @@ type ClashGroupDraft = {
   countries?: string[];
   regex?: string;
 };
+
+/** Варианты выходного формата: один список на конструктор, импорт и объединение. */
+const OUTPUT_OPTIONS = [
+  { value: "yml", label: "yml", tip: "Формат YAML" },
+  { value: "raw", label: "raw", tip: "Формат RAW" },
+  { value: "raw_base64", label: "raw (base64)", tip: "Формат RAW в base64" },
+  { value: "json", label: "json", tip: "Формат JSON" },
+] as const;
 
 const NODES_MODE_OPTIONS = [
   {
@@ -541,7 +559,7 @@ function generateHwidByOs(os: string): string {
 const PUBLIC_SHARE_PATH = /^\/l\/[A-Za-z0-9_-]+$/;
 
 export default function App() {
-  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "appTest" | "profileEditor" | "share" | "subUsers" | "overrides";
+  type ModalKind = "import" | "composer" | "bulkImport" | "merge" | "tester" | "mock" | "appTest" | "profileEditor" | "share" | "access" | "ping" | "subUsers" | "overrides";
   const [theme, setTheme] = useState<"claude" | "claude-dark">(() => {
     const saved = localStorage.getItem("sublab-theme") || localStorage.getItem("submirror-theme");
     if (saved === "claude" || saved === "claude-dark") return saved;
@@ -549,6 +567,11 @@ export default function App() {
   });
   const [favorites, setFavorites] = useState<FavoriteItem[]>(() => readFavorites());
   const [status, setStatus] = useState("");
+  const [listQuery, setListQuery] = useState("");
+  // Владелец записи: «мои» — созданные вами, «выданные» — через доступ,
+  // «чужие» — админский обзор. Чужие по умолчанию спрятаны, иначе список
+  // администратора превращается в свалку всей установки.
+  const [listOwnerFilter, setListOwnerFilter] = useState<"visible" | "mine" | "shared" | "foreign" | "all">("visible");
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authenticated, setAuthenticated] = useState(true);
   const [authResolved, setAuthResolved] = useState(false);
@@ -558,6 +581,10 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [adminUsers, setAdminUsers] = useState<AuthUser[]>([]);
+  const [stats, setStats] = useState<UsageStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
+  const [statsDays, setStatsDays] = useState(30);
   const [adminNewUsername, setAdminNewUsername] = useState("");
   const [adminNewPassword, setAdminNewPassword] = useState("");
   const [adminNewRole, setAdminNewRole] = useState<"user" | "admin">("user");
@@ -590,6 +617,7 @@ export default function App() {
   const [showAppTest, setShowAppTest] = useState(false);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [showShare, setShowShare] = useState(false);
+  const [showAccess, setShowAccess] = useState(false);
   const [showSubUsers, setShowSubUsers] = useState(false);
   const [showOverrides, setShowOverrides] = useState(false);
   const [shareItem, setShareItem] = useState<FavoriteItem | null>(null);
@@ -659,7 +687,20 @@ export default function App() {
   const [bulkImportName, setBulkImportName] = useState("Импорт подписки");
   const [mergeName, setMergeName] = useState("Объединенная подписка");
   const [mergeOutput, setMergeOutput] = useState<SubscriptionPayload["output"]>("yml");
-  const [mergeSelection, setMergeSelection] = useState<Record<string, boolean>>({});
+  const [showPing, setShowPing] = useState(false);
+  const [pingItem, setPingItem] = useState<FavoriteItem | null>(null);
+  const [pingData, setPingData] = useState<PingResponse | null>(null);
+  const [pingLoading, setPingLoading] = useState(false);
+  const [pingError, setPingError] = useState("");
+  const [pingMode, setPingMode] = useState<PingMode>("tcp");
+  const [pingAttempts, setPingAttempts] = useState(3);
+  const [mergeId, setMergeId] = useState("");
+  const [mergeOutputAuto, setMergeOutputAuto] = useState(true);
+  const [mergeItems, setMergeItems] = useState<MergeDraftItem[]>([]);
+  const [mergePreview, setMergePreview] = useState<Record<string, MergePreviewResult>>({});
+  const [mergePreviewLoading, setMergePreviewLoading] = useState(false);
+  const [mergeSaving, setMergeSaving] = useState(false);
+  const [mergeEditingIndex, setMergeEditingIndex] = useState(-1);
 
   const notify = (level: NotificationLevel, message: string) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -686,6 +727,13 @@ export default function App() {
     const fromApi = normalizePublicBaseUrl(publicBaseUrl);
     return fromApi || window.location.origin;
   }, [publicBaseUrl]);
+
+  /** Перечитать список с сервера: после синхронизации он мог поменяться целиком. */
+  const reloadFavorites = async () => {
+    const list = await fetchFavoritesRemote();
+    setFavorites(list);
+    writeFavorites(list);
+  };
 
   useEffect(() => {
     if (!authResolved) return;
@@ -743,6 +791,7 @@ export default function App() {
   }, [theme]);
 
   const isAdminPath = window.location.pathname === "/admin";
+  const isStatsPath = window.location.pathname === "/stats";
   const publicShareMatch = window.location.pathname.match(/^\/l\/([A-Za-z0-9_-]+)$/);
   const publicShareId = publicShareMatch ? publicShareMatch[1] : "";
   const publicTypeOverrideRaw = String(new URLSearchParams(window.location.search).get("type") || "").trim().toLowerCase();
@@ -759,8 +808,7 @@ export default function App() {
    */
   const canEditSubs = !authEnabled || Boolean(authUser?.canEdit) || isAdminUser;
   const showAdvanced = isAdminUser || !authEnabled;
-  const isMainPath = !isAdminPath && !publicShareId;
-  const isAnyModalOpen = showImport || showComposer || showBulkImport || showMerge || showTester || showMock || showAppTest || showProfileEditor || showShare || showSubUsers || showOverrides;
+  const isMainPath = !isAdminPath && !isStatsPath && !publicShareId;
 
   const refreshAdminUsers = async () => {
     const list = await adminListUsers();
@@ -771,6 +819,20 @@ export default function App() {
     if (!isAdminPath || !authenticated || !isAdminUser) return;
     void refreshAdminUsers().catch(() => {});
   }, [isAdminPath, authenticated, isAdminUser]);
+
+  const loadStats = (days: number) => {
+    setStatsLoading(true);
+    setStatsError("");
+    void fetchUsageStats(days)
+      .then((data) => setStats(data))
+      .catch((e) => setStatsError((e as Error)?.message || "Не удалось получить статистику"))
+      .finally(() => setStatsLoading(false));
+  };
+
+  useEffect(() => {
+    if (!isStatsPath || !authenticated) return;
+    loadStats(statsDays);
+  }, [isStatsPath, authenticated, statsDays]);
 
   useEffect(() => {
     if (!publicShareId) return;
@@ -800,7 +862,7 @@ export default function App() {
   }, [publicShareId, publicTypeOverride]);
 
   useEffect(() => {
-    if (!showShare || !shareItem?.shortId) {
+    if ((!showShare && !showAccess) || !shareItem?.shortId) {
       setShareModalMeta(null);
       setShareModalMetaLoading(false);
       setShareAccessLoading(false);
@@ -840,7 +902,7 @@ export default function App() {
         setShareAccessDraft({});
       })
       .finally(() => setShareAccessLoading(false));
-  }, [showShare, shareItem?.shortId, isAdminUser, adminUsers]);
+  }, [showShare, showAccess, shareItem?.shortId, isAdminUser, adminUsers]);
 
   const persistFavorites = async (list: FavoriteItem[]) => {
     const next = list.slice(0, 50);
@@ -907,6 +969,8 @@ export default function App() {
     setShowAppTest(false);
     setShowProfileEditor(false);
     setShowShare(false);
+    setShowAccess(false);
+    setShowPing(false);
     setShowSubUsers(false);
     setShowOverrides(false);
   };
@@ -922,6 +986,8 @@ export default function App() {
     if (kind === "appTest") setShowAppTest(true);
     if (kind === "profileEditor") setShowProfileEditor(true);
     if (kind === "share") setShowShare(true);
+    if (kind === "access") setShowAccess(true);
+    if (kind === "ping") setShowPing(true);
     if (kind === "subUsers") setShowSubUsers(true);
     if (kind === "overrides") setShowOverrides(true);
   };
@@ -1059,11 +1125,13 @@ export default function App() {
       version: 1,
       exportedAt: new Date().toISOString(),
       account: authUser?.username || "",
-      items: favorites,
+      // Чужие подписки админ видит, но в свою копию они не едут: восстановление
+      // из такого файла присвоило бы их ему.
+      items: favorites.filter((item) => !item.foreign),
     };
     const stamp = payload.exportedAt.replace(/[:.]/g, "-");
     downloadTextFile(JSON.stringify(payload, null, 2), `sub-lab-backup-${stamp}.json`);
-    notify("success", `Экспортировано подписок: ${favorites.length}`);
+    notify("success", `Экспортировано подписок: ${payload.items.length}`);
   };
 
   const rewriteFavoritesToCurrentOrigin = async () => {
@@ -1211,6 +1279,10 @@ export default function App() {
         payload: nextPayload,
         labels: labelsFromPayload(nextPayload),
         derived: !forceNew ? existing?.derived : undefined,
+        // Чужую подписку админ правит на месте: признак владельца надо
+        // сохранить, иначе карточка до перезагрузки уедет в «мои».
+        foreign: !forceNew ? existing?.foreign : undefined,
+        ownerUsername: !forceNew ? existing?.ownerUsername : undefined,
         ts: Date.now(),
       };
 
@@ -1253,6 +1325,12 @@ export default function App() {
       notify("warning", "Эту подписку можно только просматривать");
       return;
     }
+    // У объединения свой конструктор: в обычном настраивать нечего — там
+    // устройство и приложение, а у объединения это своё в каждом источнике.
+    if (mergeIdFromPayload(item.payload)) {
+      await openMergeEditor(idx);
+      return;
+    }
     setEditingIndex(idx);
     setName(item.title);
     setShortIdDraft(item.shortId || "");
@@ -1278,45 +1356,163 @@ export default function App() {
     notify("info", "Подписка удалена");
   };
 
+  /** Короткая ссылка объединения: `merge:<id>` в параметрах подписки. */
+  const mergeIdFromPayload = (value: SubscriptionPayload | undefined): string => {
+    const subUrl = String(value?.sub_url || "").trim();
+    return subUrl.startsWith("merge:") ? subUrl.slice(6).trim() : "";
+  };
+
+  const resetMergeDrafts = () => {
+    setMergePreview({});
+    setMergePreviewLoading(false);
+    setMergeSaving(false);
+  };
+
+  // Кандидаты на объединение — все подписки, кроме самих объединений: вложенные
+  // объединения превратили бы обновление подписки в дерево запросов.
+  const mergeCandidates = () => favorites.filter((item) => !mergeIdFromPayload(item.payload));
+
   const openMergeModal = () => {
+    setMergeId("");
+    setMergeEditingIndex(-1);
     setMergeName("Объединенная подписка");
     setMergeOutput("yml");
-    setMergeSelection({});
+    setMergeOutputAuto(true);
+    setMergeItems(buildFavoriteDrafts(mergeCandidates()));
+    resetMergeDrafts();
     openModal("merge");
   };
 
-  const handleCreateMergedSubscription = async () => {
-    if (!mergeName.trim()) {
-      setStatus("Укажите название объединенной подписки");
-      return;
-    }
-    if (selectedMergeIndexes.length === 0) {
-      setStatus("Выберите хотя бы одну подписку");
-      return;
-    }
+  /**
+   * Правка существующего объединения.
+   *
+   * Состав читаем с сервера, а не из избранного: там лежит только ссылка
+   * `merge:<id>`, а какие подписки внутри и с какими регулярками — знает
+   * сохранённый источник.
+   */
+  const openMergeEditor = async (index: number) => {
+    const favorite = favorites[index];
+    const id = mergeIdFromPayload(favorite?.payload);
+    if (!favorite || !id) return;
+    resetMergeDrafts();
+    setMergeEditingIndex(index);
+    setMergeId(id);
+    setMergeName(favorite.title);
+    setMergeOutput((favorite.payload.output || "yml") as SubscriptionPayload["output"]);
+    setMergeOutputAuto(Boolean(favorite.payload.output_auto));
+    const drafts = buildFavoriteDrafts(mergeCandidates());
+    setMergeItems(drafts);
+    openModal("merge");
     try {
-      const items: SubscriptionPayload[] = [];
-      for (const idx of selectedMergeIndexes) {
-        const item = favorites[idx];
-        if (!item) continue;
-        let sourcePayload = item.payload;
-        if ((!sourcePayload || !sourcePayload.sub_url) && item.shortId) {
-          sourcePayload = await fetchShortLink(item.shortId);
-        }
-        items.push({ ...defaultPayload(), ...sourcePayload });
+      const source = await fetchMergedSource(id);
+      setMergeName(source.name || favorite.title);
+      setMergeItems(drafts.map((draft) => {
+        const saved = source.items.find((item) => (
+          (item.shortId && draft.shortId && item.shortId === draft.shortId)
+          || String(item.sub_url || "") === String(draft.payload.sub_url || "")
+        ));
+        if (!saved) return draft;
+        return {
+          ...draft,
+          selected: true,
+          pattern: String(saved.filter?.pattern || ""),
+          onEmpty: saved.filter?.onEmpty || "all",
+        };
+      }));
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось прочитать состав объединения");
+    }
+  };
+
+  /** Элементы объединения в том виде, в котором их ждёт сервер. */
+  const buildMergeItems = async (): Promise<MergeItem[]> => {
+    const out: MergeItem[] = [];
+    for (const draft of mergeItems) {
+      if (!draft.selected) continue;
+      let sourcePayload = draft.payload;
+      if ((!sourcePayload || !sourcePayload.sub_url) && draft.shortId) {
+        sourcePayload = await fetchShortLink(draft.shortId);
       }
-      const merged = await createMergedSource({
-        name: mergeName.trim(),
-        items,
+      out.push({
+        ...defaultPayload(),
+        ...sourcePayload,
+        title: draft.title,
+        shortId: draft.shortId,
+        filter: { pattern: draft.pattern.trim(), onEmpty: draft.onEmpty },
       });
+    }
+    return out;
+  };
+
+  const runMergePreview = async () => {
+    const selected = mergeItems.filter((item) => item.selected);
+    if (selected.length === 0) return;
+    setMergePreviewLoading(true);
+    try {
+      const items = await buildMergeItems();
+      const results = await previewMergeItems(items);
+      const next: Record<string, MergePreviewResult> = {};
+      selected.forEach((draft, index) => {
+        const row = results[index];
+        if (row) next[draft.key] = row;
+      });
+      setMergePreview(next);
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось получить серверы источников");
+    } finally {
+      setMergePreviewLoading(false);
+    }
+  };
+
+  const handleSaveMerge = async () => {
+    const title = mergeName.trim();
+    if (!title) {
+      notify("warning", "Укажите название объединенной подписки");
+      return;
+    }
+    if (mergeItems.every((item) => !item.selected)) {
+      notify("warning", "Выберите хотя бы одну подписку");
+      return;
+    }
+    setMergeSaving(true);
+    try {
+      const items = await buildMergeItems();
+      if (mergeId) {
+        await updateMergedSource(mergeId, { name: title, items });
+        const mergedPayload: SubscriptionPayload = {
+          ...defaultPayload(),
+          sub_url: `merge:${mergeId}`,
+          output: mergeOutput,
+          output_auto: mergeOutputAuto ? "1" : "",
+        };
+        const existing = favorites[mergeEditingIndex];
+        if (existing?.shortId) {
+          await updateShortLink(existing.shortId, mergedPayload, title, { hidden: existing.hidden, tags: existing.tags });
+        }
+        saveFavorites(favorites.map((item, index) => (index === mergeEditingIndex
+          ? {
+            ...item,
+            title,
+            payload: mergedPayload,
+            labels: [...labelsFromPayload(mergedPayload), `merge:${items.length}`],
+            ts: Date.now(),
+          }
+          : item)));
+        setShowMerge(false);
+        notify("success", "Объединение обновлено");
+        return;
+      }
+
+      const merged = await createMergedSource({ name: title, items });
       const mergedPayload: SubscriptionPayload = {
         ...defaultPayload(),
         sub_url: merged.subUrl,
         output: mergeOutput,
+        output_auto: mergeOutputAuto ? "1" : "",
       };
-      const created = await createShortLink(mergedPayload, mergeName.trim());
+      const created = await createShortLink(mergedPayload, title);
       const next: FavoriteItem = {
-        title: mergeName.trim(),
+        title,
         url: created.shortUrl,
         shortId: created.id,
         payload: mergedPayload,
@@ -1328,9 +1524,11 @@ export default function App() {
       setStatus(`Сохранено: ${created.shortUrl}`);
       notify("success", "Объединенная подписка создана");
     } catch (e) {
-      const message = (e as Error)?.message || "Не удалось создать объединенную подписку";
+      const message = (e as Error)?.message || "Не удалось сохранить объединение";
       setStatus(message);
       notify("error", message);
+    } finally {
+      setMergeSaving(false);
     }
   };
 
@@ -1362,10 +1560,6 @@ export default function App() {
   const osOptions = useMemo(() => Object.keys(uaCatalog.options || {}), [uaCatalog]);
   const composerFileServersCount = useMemo(() => countSourceServers(composerFileBody), [composerFileBody]);
   const composerTextServersCount = useMemo(() => countSourceServers(composerTextBody), [composerTextBody]);
-  const selectedMergeIndexes = useMemo(
-    () => Object.entries(mergeSelection).filter(([, selected]) => selected).map(([key]) => Number(key)).filter((x) => Number.isInteger(x) && x >= 0 && x < favorites.length),
-    [mergeSelection, favorites.length],
-  );
   const bulkImportFlags = useMemo(
     () => Array.from(new Set(bulkImportItems.map((item) => item.flag))).sort((a, b) => a.localeCompare(b)),
     [bulkImportItems],
@@ -1556,6 +1750,43 @@ export default function App() {
   const openShare = (item: FavoriteItem) => {
     setShareItem(item);
     openModal("share");
+  };
+
+  /**
+   * Пинг серверов подписки.
+   *
+   * Меряем с панели: свой туннель она поднять не может, поэтому это оценка
+   * доступности точки входа, а не скорости внутри соединения.
+   */
+  const runPing = async (item: FavoriteItem, mode: PingMode, attempts: number) => {
+    setPingLoading(true);
+    setPingError("");
+    try {
+      let params = item.payload;
+      if ((!params || !params.sub_url) && item.shortId) {
+        params = await fetchShortLink(item.shortId);
+      }
+      const data = await pingSubscription({ ...defaultPayload(), ...params }, { mode, attempts });
+      setPingData(data);
+    } catch (e) {
+      setPingData(null);
+      setPingError((e as Error)?.message || "Не удалось опросить серверы");
+    } finally {
+      setPingLoading(false);
+    }
+  };
+
+  const openPing = (item: FavoriteItem) => {
+    setPingItem(item);
+    setPingData(null);
+    setPingError("");
+    openModal("ping");
+    void runPing(item, pingMode, pingAttempts);
+  };
+
+  const openAccess = (item: FavoriteItem) => {
+    setShareItem(item);
+    openModal("access");
   };
 
   const saveShareAccess = async () => {
@@ -1908,20 +2139,157 @@ export default function App() {
     window.location.reload();
   };
 
+  const goStats = () => {
+    history.replaceState(null, "", "/stats");
+    window.location.reload();
+  };
+
+  // Поиск по списку не меняет сам список: индекс исходного массива едет вместе
+  // с записью, поэтому редактирование и удаление работают как раньше.
+  const visibleFavorites = useMemo(() => {
+    const all = favorites.map((item, index) => ({ item, index }));
+    const entries = all.filter(({ item }) => {
+      if (listOwnerFilter === "all") return true;
+      if (listOwnerFilter === "foreign") return Boolean(item.foreign);
+      if (listOwnerFilter === "shared") return Boolean(item.derived) && !item.foreign;
+      if (listOwnerFilter === "mine") return !item.derived;
+      return !item.foreign;
+    });
+    const query = listQuery.trim().toLowerCase();
+    if (!query) return entries;
+    return entries.filter(({ item }) => [
+      item.title,
+      item.url,
+      item.payload.sub_url,
+      item.payload.app,
+      item.payload.device,
+      ...(item.tags || []),
+      ...(item.labels || []),
+      item.ownerUsername || "",
+    ].join(" ").toLowerCase().includes(query));
+  }, [favorites, listQuery, listOwnerFilter]);
+
+  const foreignFavoritesCount = useMemo(
+    () => favorites.filter((item) => item.foreign).length,
+    [favorites],
+  );
+
   const formatDateTime = (value: string) => {
     const ts = Date.parse(String(value || ""));
     if (!Number.isFinite(ts)) return "—";
     return new Date(ts).toLocaleString();
   };
 
+  const shellNav: ShellNavItem[] = [
+    {
+      key: "subs",
+      label: "Подписки",
+      icon: <ListIcon className="btn-icon" />,
+      active: isMainPath,
+      onClick: () => { if (!isMainPath) goMain(); },
+    },
+    {
+      key: "stats",
+      label: "Статистика",
+      icon: <ChartIcon className="btn-icon" />,
+      active: isStatsPath,
+      onClick: () => { if (!isStatsPath) goStats(); },
+    },
+    ...(isAdminUser
+      ? [{
+        key: "admin",
+        label: "Админка",
+        icon: <ShieldIcon className="btn-icon" />,
+        active: isAdminPath,
+        onClick: () => { if (!isAdminPath) goAdmin(); },
+      } as ShellNavItem]
+      : []),
+  ];
+
+  // Быстрые действия главной страницы живут в боковой колонке.
+  const mainQuickActions = (
+    <>
+      <TipButton tip="Добавить новую подписку" tone="primary" onClick={() => { resetComposer(); openModal("composer"); }}>
+        <PlusIcon className="btn-icon" /> Добавить
+      </TipButton>
+      <TipButton tip="Импортировать подписку по ссылке" onClick={() => openModal("import")}>
+        <ImportIcon className="btn-icon" /> Импорт
+      </TipButton>
+      <TipButton tip="Скачать резервную копию всех доступных подписок" onClick={downloadFavoritesBackup}>
+        <SaveIcon className="btn-icon" /> Резервная копия
+      </TipButton>
+      <TipButton tip="Восстановить подписки из резервной копии" onClick={() => backupRestoreInputRef.current?.click()}>
+        <ImportIcon className="btn-icon" /> Восстановить
+      </TipButton>
+      <input ref={backupRestoreInputRef} type="file" accept="application/json,.json" hidden onChange={(e) => void handleRestoreFavoritesBackup(e)} />
+      {showAdvanced ? (
+        <>
+          <TipButton tip="Импортировать массовый файл прокси" onClick={openBulkImportModal}>
+            <ImportIcon className="btn-icon" /> Массовый импорт
+          </TipButton>
+          <TipButton tip="Объединить несколько подписок в одну" onClick={openMergeModal}>
+            <CopyIcon className="btn-icon" /> Объединить
+          </TipButton>
+          <TipButton tip="Пошагово проверить, какие заголовки реально отправляет приложение" onClick={openAppTestModal}>
+            <FlaskIcon className="btn-icon" /> Тест приложения
+          </TipButton>
+          <TipButton tip="Переписать все сохраненные ссылки на текущий домен" onClick={() => void rewriteFavoritesToCurrentOrigin()}>
+            <CopyIcon className="btn-icon" /> Обновить ссылки
+          </TipButton>
+        </>
+      ) : null}
+    </>
+  );
+
+  // Выдача доступов: один и тот же редактор в окне «Поделиться» и в отдельном
+  // окне «Доступы» — второе нужно, чтобы права не приходилось искать в конце
+  // длинной страницы подключения.
+  const accessEditor = (
+    <>
+      <div className="admin-section-head">
+        <h2>Кому выдан доступ</h2>
+        <p>Выберите уровень для каждого пользователя: просмотр или редактирование подписки.</p>
+      </div>
+      {shareAccessLoading ? <div className="status">Загрузка доступа...</div> : null}
+      {!shareAccessLoading ? (
+        <>
+          <div className="status">Владелец: {shareAccessOwner || "не задан"}</div>
+          <div className="share-access-list">
+            {shareAccessUsers.length === 0 ? <div className="status">Нет обычных пользователей для выдачи доступа.</div> : null}
+            {shareAccessUsers.map((user) => (
+              <label key={user.username} className="share-access-row">
+                <span>{user.username}</span>
+                <select
+                  value={shareAccessDraft[user.username] || ""}
+                  disabled={user.username === shareAccessOwner}
+                  onChange={(e) => setShareAccessDraft((prev) => ({
+                    ...prev,
+                    [user.username]: (e.target.value === "edit" ? "edit" : (e.target.value === "view" ? "view" : "")),
+                  }))}
+                >
+                  <option value="">нет доступа</option>
+                  <option value="view">view</option>
+                  <option value="edit">edit</option>
+                </select>
+              </label>
+            ))}
+          </div>
+          <div className="toolbar">
+            <TipButton tip="Сохранить права доступа к подписке" tone="primary" onClick={() => void saveShareAccess()}>
+              Сохранить доступ
+            </TipButton>
+          </div>
+        </>
+      ) : null}
+    </>
+  );
+
   const topRightControls = (
     <div className="top-right-controls">
       <Tooltip content={theme === "claude" ? "Включить тёмную тему" : "Включить светлую тему"}>
-        <span className="ui-tip-wrap">
-          <IconButton className="theme-toggle compact" aria-label="Сменить тему" onClick={() => setTheme((prev) => (prev === "claude" ? "claude-dark" : "claude"))}>
-            <ThemeIcon className="btn-icon" />
-          </IconButton>
-        </span>
+        <IconButton className="theme-toggle" aria-label="Сменить тему" onClick={() => setTheme((prev) => (prev === "claude" ? "claude-dark" : "claude"))}>
+          <ThemeIcon className="btn-icon" />
+        </IconButton>
       </Tooltip>
       {authEnabled && authenticated ? (
         <UserMenu
@@ -1934,20 +2302,137 @@ export default function App() {
     </div>
   );
 
+  const profileEditorContent = (
+    <div className="editor-layout">
+      <section className="editor-pane">
+        <div className="form-section-head">
+          <div className="form-section-title">Профили</div>
+          <div className="form-section-lead">Заголовки, которые уходят в источник подписки.</div>
+        </div>
+        <div className="row">
+          <select value={profileName} onChange={(e) => setProfileName(e.target.value)}>
+            <option value="">Выберите профиль</option>
+            {profileCatalog.profiles.map((x) => <option key={x} value={x}>{x}</option>)}
+          </select>
+          <TextInput placeholder="или имя нового профиля" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+        </div>
+        {selectedProfileMeta ? (
+          <div className="composer-meta-hint">
+            Владелец: {selectedProfileMeta.ownerUsername || "shared"} · Тип: {selectedProfileMeta.visibility}
+          </div>
+        ) : null}
+        <div className="profile-form-card">
+          <div className="field">
+            <span className="field-label">Переопределение HWID</span>
+            <Segmented
+              ariaLabel="Переопределение HWID"
+              value={profileForm.allowHwidOverride ? "allow" : "deny"}
+              onChange={(value) => setProfileForm((prev) => ({ ...prev, allowHwidOverride: value === "allow" }))}
+              options={[
+                { value: "allow", label: "Разрешено", tip: "Разрешить override hwid из запроса" },
+                { value: "deny", label: "Запрещено", tip: "Запретить override hwid из заголовков запроса" },
+              ]}
+            />
+          </div>
+
+          <div className="field">
+            <span className="field-label">Заголовки профиля</span>
+            <div className="profile-headers-list">
+              {profileForm.headers.length === 0 ? <div className="status">Заголовки не добавлены</div> : null}
+              {profileForm.headers.map((row) => (
+                <div key={row.id} className="profile-header-row">
+                  <TextInput
+                    placeholder="header-name"
+                    value={row.key}
+                    onChange={(e) => setProfileForm((prev) => ({
+                      ...prev,
+                      headers: prev.headers.map((item) => (item.id === row.id ? { ...item, key: e.target.value } : item)),
+                    }))}
+                  />
+                  <TextInput
+                    placeholder="value"
+                    value={row.value}
+                    onChange={(e) => setProfileForm((prev) => ({
+                      ...prev,
+                      headers: prev.headers.map((item) => (item.id === row.id ? { ...item, value: e.target.value } : item)),
+                    }))}
+                  />
+                  <TipIconButton
+                    tip="Удалить заголовок"
+                    aria-label="Удалить заголовок"
+                    tone="danger"
+                    icon={<TrashIcon className="btn-icon" />}
+                    onClick={() => setProfileForm((prev) => ({ ...prev, headers: prev.headers.filter((item) => item.id !== row.id) }))}
+                  />
+                </div>
+              ))}
+            </div>
+            <TipButton
+              tip="Добавить заголовок"
+              onClick={() => setProfileForm((prev) => ({
+                ...prev,
+                headers: [...prev.headers, { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, key: "", value: "" }],
+              }))}
+            >
+              <PlusIcon className="btn-icon" /> Добавить заголовок
+            </TipButton>
+          </div>
+        </div>
+        <div className="toolbar">
+          <TipButton tip="Загрузить выбранный профиль" onClick={() => void loadProfileFile()}>Загрузить</TipButton>
+          <TipButton tip="Сохранить профиль" tone="primary" onClick={() => void saveProfileFile()}>
+            <SaveIcon className="btn-icon" /> Сохранить
+          </TipButton>
+          <TipButton tip="Удалить профиль" tone="danger" onClick={() => void removeProfileFile()}>
+            <TrashIcon className="btn-icon" /> Удалить
+          </TipButton>
+        </div>
+      </section>
+
+      <section className="editor-pane">
+        <div className="form-section-head">
+          <div className="form-section-title">UA-каталог</div>
+          <div className="form-section-lead">User-Agent подставляется по паре «ОС + приложение».</div>
+        </div>
+        <div className="row">
+          <select value={selectedOs} onChange={(e) => setSelectedOs(e.target.value)}>
+            <option value="">Выберите ОС</option>
+            {osOptions.map((osName) => <option key={osName} value={osName}>{osName}</option>)}
+          </select>
+          <select value={payload.app || ""} onChange={(e) => setPayload((p) => ({ ...p, app: e.target.value }))}>
+            <option value="">Выберите приложение</option>
+            {appOptions.map((appName) => <option key={appName} value={appName}>{appName}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <span className="field-label">Текущий User-Agent</span>
+          <Textarea readOnly value={uaPreview || "UA не найден"} />
+        </div>
+        <div className="status">UA берётся из каталога и автоматически применяется при запросах.</div>
+      </section>
+    </div>
+  );
+
   const mockModalContent = (
     <div className="mock-layout">
       <section className="mock-section">
-        <h3 className="editor-heading">1. Подключение mock</h3>
+        <div className="step-head">
+            <span className="step-num">1</span>
+            <div className="form-section-title">Подключение mock</div>
+          </div>
         <label className="composer-label">URL mock-сервера</label>
         <div className="url-row">
           <TextInput placeholder="http://.../mock/<id>" value={mockUrl} onChange={(e) => setMockUrl(e.target.value)} />
-          <TipButton tip="Загрузить конфигурацию mock по URL" className="btn" onClick={() => void loadMock()}>Загрузить</TipButton>
+          <TipButton tip="Загрузить конфигурацию mock по URL" onClick={() => void loadMock()}>Загрузить</TipButton>
         </div>
         <div className="status">Текущий URL: {mockResolvedUrl || "не задан"}</div>
       </section>
 
       <section className="mock-section">
-        <h3 className="editor-heading">2. Конфигурация ответа</h3>
+        <div className="step-head">
+            <span className="step-num">2</span>
+            <div className="form-section-title">Конфигурация ответа</div>
+          </div>
         <div className="row">
           <select value={mockPreset} onChange={(e) => setMockPreset(e.target.value)}>
             <option value="stub_raw">stub_raw</option>
@@ -1966,16 +2451,19 @@ export default function App() {
         <label className="composer-label">body</label>
         <Textarea placeholder="Тело ответа mock-сервера" value={mockBody} onChange={(e) => setMockBody(e.target.value)} />
         <div className="toolbar">
-          <TipButton tip="Создать новый mock-сервер" className="btn" onClick={() => void createMock()}>Создать</TipButton>
-          <TipButton tip="Обновить текущий mock-сервер" className="btn" onClick={() => void updateMock()}>Обновить</TipButton>
-          <TipButton tip="Показать логи запросов mock-сервера" className="btn" onClick={() => void refreshMockLogs()}>Логи</TipButton>
-          <TipButton tip="Очистить логи mock-сервера" className="btn" onClick={() => void clearLogs()}>Очистить логи</TipButton>
-          <TipButton tip="Подставить mock URL в sub_url" tone="primary" className="btn" onClick={() => setPayload((p) => ({ ...p, sub_url: mockResolvedUrl }))}>Использовать в конструкторе</TipButton>
+          <TipButton tip="Создать новый mock-сервер" onClick={() => void createMock()}>Создать</TipButton>
+          <TipButton tip="Обновить текущий mock-сервер" onClick={() => void updateMock()}>Обновить</TipButton>
+          <TipButton tip="Показать логи запросов mock-сервера" onClick={() => void refreshMockLogs()}>Логи</TipButton>
+          <TipButton tip="Очистить логи mock-сервера" onClick={() => void clearLogs()}>Очистить логи</TipButton>
+          <TipButton tip="Подставить mock URL в sub_url" tone="primary" onClick={() => setPayload((p) => ({ ...p, sub_url: mockResolvedUrl }))}>Использовать в конструкторе</TipButton>
         </div>
       </section>
 
       <section className="mock-section">
-        <h3 className="editor-heading">3. Тест подписки через mock</h3>
+        <div className="step-head">
+            <span className="step-num">3</span>
+            <div className="form-section-title">Тест подписки через mock</div>
+          </div>
         <label className="composer-label">Выберите подписку для теста</label>
         <div className="row">
           <select value={mockTestTarget} onChange={(e) => setMockTestTarget(e.target.value)}>
@@ -1986,12 +2474,12 @@ export default function App() {
               </option>
             ))}
           </select>
-          <TipButton tip="Запустить тест выбранной подписки через mock-сервер" tone="primary" className="btn" onClick={() => void runMockSubscriptionTest()}>
+          <TipButton tip="Запустить тест выбранной подписки через mock-сервер" tone="primary" onClick={() => void runMockSubscriptionTest()}>
             Тест через mock
           </TipButton>
         </div>
         <div className="toolbar">
-          <TipButton tip="Открыть полный тестер" className="btn" onClick={() => setShowTester(true)}>Открыть тестер</TipButton>
+          <TipButton tip="Открыть полный тестер" onClick={() => setShowTester(true)}>Открыть тестер</TipButton>
           <TipIconButton tip="Копировать исходный ответ" aria-label="Копировать исходный ответ" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.upstream?.body || "")} />
           <TipIconButton tip="Копировать результат конвертации" aria-label="Копировать результат конвертации" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.conversion?.body || "")} />
         </div>
@@ -2008,7 +2496,7 @@ export default function App() {
       </section>
 
       <section className="mock-section">
-        <h3 className="editor-heading">Логи mock-сервера</h3>
+        <div className="form-section-title">Логи mock-сервера</div>
         <pre className="json">{mockLogs || "Логов пока нет"}</pre>
       </section>
     </div>
@@ -2017,25 +2505,31 @@ export default function App() {
   const appTestModalContent = (
     <div className="app-test-layout">
       <section className={`app-test-step ${appTestStep === 1 ? "active" : ""}`}>
-        <h3 className="editor-heading">1. Создайте временный URL</h3>
+        <div className="step-head">
+            <span className="step-num">1</span>
+            <div className="form-section-title">Создайте временный URL</div>
+          </div>
         <div className="status">
           Этот URL нужен только для диагностики. Приложение запросит его как обычную подписку, а мы покажем все ключевые заголовки и тело запроса.
         </div>
         <div className="toolbar">
-          <TipButton tip="Создать временный диагностический URL" tone="primary" className="btn" onClick={() => void createAppTestSession()} disabled={appTestLoading}>
+          <TipButton tip="Создать временный диагностический URL" tone="primary" onClick={() => void createAppTestSession()} disabled={appTestLoading}>
             {appTestLoading ? "Создание..." : "Создать временный URL"}
           </TipButton>
         </div>
       </section>
 
       <section className={`app-test-step ${appTestStep === 2 ? "active" : ""}`}>
-        <h3 className="editor-heading">2. Откройте URL в приложении</h3>
+        <div className="step-head">
+            <span className="step-num">2</span>
+            <div className="form-section-title">Откройте URL в приложении</div>
+          </div>
         <div className="composer-meta-hint">
           Можно просто скопировать URL вручную или сразу открыть подходящее приложение через deeplink-кнопку.
         </div>
         <TextInput value={appTestUrl} onChange={() => {}} readOnly placeholder="Сначала создайте временный URL" />
         <div className="toolbar">
-          <TipButton tip="Скопировать тестовый URL" className="btn" onClick={() => void copyToClipboard(appTestUrl)} disabled={!appTestUrl}>
+          <TipButton tip="Скопировать тестовый URL" onClick={() => void copyToClipboard(appTestUrl)} disabled={!appTestUrl}>
             <CopyIcon className="btn-icon" /> Копировать URL
           </TipButton>
         </div>
@@ -2054,7 +2548,6 @@ export default function App() {
         <div className="toolbar">
           <TipButton
             tip="Открыть deeplink выбранного приложения"
-            className="btn"
             onClick={() => {
               const deeplink = buildAppShareLink(appTestSelectedApp, appTestUrl);
               if (!deeplink) {
@@ -2074,7 +2567,10 @@ export default function App() {
       </section>
 
       <section className={`app-test-step ${appTestStep === 3 ? "active" : ""}`}>
-        <h3 className="editor-heading">3. Что прислало приложение</h3>
+        <div className="step-head">
+            <span className="step-num">3</span>
+            <div className="form-section-title">Что прислало приложение</div>
+          </div>
         <div className="result-grid app-test-summary-grid">
           <div className="result"><strong>UA</strong><div>{appTestSummary.userAgent || "—"}</div></div>
           <div className="result"><strong>x-hwid</strong><div>{appTestSummary.hwid || "—"}</div></div>
@@ -2089,12 +2585,12 @@ export default function App() {
         <label className="composer-label">Имя профиля</label>
         <div className="row">
           <TextInput placeholder="capture-myapp-..." value={appTestProfileName} onChange={(e) => setAppTestProfileName(e.target.value)} />
-          <TipButton tip="Сохранить профиль из пойманных заголовков" tone="primary" className="btn" onClick={() => void saveCapturedProfile()} disabled={appTestSavingProfile || !appTestLatestLog}>
+          <TipButton tip="Сохранить профиль из пойманных заголовков" tone="primary" onClick={() => void saveCapturedProfile()} disabled={appTestSavingProfile || !appTestLatestLog}>
             {appTestSavingProfile ? "Сохранение..." : "Создать профиль"}
           </TipButton>
         </div>
         <div className="toolbar">
-          <TipButton tip="Очистить логи и запустить тест заново" className="btn" onClick={() => void resetAppTestCapture()} disabled={!appTestSource?.id}>
+          <TipButton tip="Очистить логи и запустить тест заново" onClick={() => void resetAppTestCapture()} disabled={!appTestSource?.id}>
             Очистить и повторить
           </TipButton>
         </div>
@@ -2113,12 +2609,7 @@ export default function App() {
   if (publicShareId) {
     const publicFullUrl = publicSharePayload ? buildFullUrlWithOrigin(publicSharePayload, effectiveOrigin) : "";
     return (
-      <main className="page">
-        {isAnyModalOpen ? null : topRightControls}
-        <HeroHeader
-          logoSrc={subLabIcon}
-          subtitle="Подключение подписки"
-        />
+      <AppShell logoSrc={subLabIcon} subtitle="Подключение подписки" footer={topRightControls}>
         {publicShareLoading ? <div className="status">Загрузка...</div> : null}
         {publicShareError ? <div className="status">{publicShareError}</div> : null}
         {publicSharePayload && !publicShareError ? (
@@ -2138,26 +2629,21 @@ export default function App() {
             onCopy={(text) => { void copyToClipboard(text); }}
           />
         ) : null}
-      </main>
+      </AppShell>
     );
   }
 
   if (!authResolved) {
     return (
-      <main className="page">
-        {isAnyModalOpen ? null : topRightControls}
-        <HeroHeader
-          logoSrc={subLabIcon}
-          subtitle="Проверка доступа"
-        />
+      <AppShell logoSrc={subLabIcon} subtitle="Проверка доступа" footer={topRightControls}>
         <section className="auth-layout">
-          <article className="sub-card auth-card">
+          <article className="card auth-card">
             <h2>Проверка авторизации...</h2>
             <p>Секунду, загружаем данные сессии.</p>
           </article>
         </section>
         <NotificationToasts items={notifications} onDismiss={dismissNotification} />
-      </main>
+      </AppShell>
     );
   }
 
@@ -2165,45 +2651,65 @@ export default function App() {
     return null;
   }
 
+  if (isStatsPath) {
+    return (
+      <AppShell logoSrc={subLabIcon} subtitle="Статистика" nav={shellNav} footer={topRightControls}>
+        <section className="page-head">
+          <div>
+            <h1>Статистика</h1>
+            <p>Как часто забирают подписки и с каких устройств</p>
+          </div>
+        </section>
+        <StatsPage
+          stats={stats}
+          loading={statsLoading}
+          error={statsError}
+          days={statsDays}
+          onDaysChange={setStatsDays}
+          onRefresh={() => loadStats(statsDays)}
+        />
+        <NotificationToasts items={notifications} onDismiss={dismissNotification} />
+      </AppShell>
+    );
+  }
+
   if (isAdminPath) {
     if (!isAdminUser) {
       return (
-        <main className="page">
-          {isAnyModalOpen ? null : topRightControls}
+        <AppShell logoSrc={subLabIcon} subtitle="Админка" footer={topRightControls}>
           <section className="auth-screen">
             <h1>/admin</h1>
             <p>Доступ только для admin</p>
             <div className="toolbar">
-              <TipButton tip="На главную" className="btn" onClick={goMain}>
+              <TipButton tip="На главную" onClick={goMain}>
                 На главную
               </TipButton>
             </div>
           </section>
           <NotificationToasts items={notifications} onDismiss={dismissNotification} />
-        </main>
+        </AppShell>
       );
     }
 
     return (
-      <main className="page">
-        {isAnyModalOpen ? null : topRightControls}
-        <header className="hero admin-hero">
+      <AppShell logoSrc={subLabIcon} subtitle="Админка" nav={shellNav} footer={topRightControls}>
+        <section className="page-head">
           <div>
             <h1>Админка</h1>
             <p>Управление пользователями и сервисными инструментами</p>
           </div>
-        </header>
+        </section>
 
         <section className="admin-overview">
-          <article className="sub-card admin-metric-card">
-            <div className="admin-metric-label">Пользователи</div>
+          <article className="card admin-metric-card">
+            <div className="admin-metric-label">Всего пользователей</div>
             <div className="admin-metric-value">{adminUsers.length}</div>
           </article>
-          <article className="sub-card admin-metric-card">
+          <article className="card admin-metric-card">
             <div className="admin-metric-label">Администраторы</div>
             <div className="admin-metric-value">{adminUsers.filter((u) => u.role === "admin").length}</div>
           </article>
-          <article className="sub-card admin-metric-card">
+          <article className="card admin-metric-card">
             <div className="admin-metric-label">Обычные пользователи</div>
             <div className="admin-metric-value">{adminUsers.filter((u) => u.role === "user").length}</div>
           </article>
@@ -2221,7 +2727,7 @@ export default function App() {
               <span className="admin-tool-text">Проверка источников, пресеты, логирование и отладка ответа.</span>
             </button>
             <button type="button" className="admin-tool-card" onClick={openAppTestModal}>
-              <span className="admin-tool-icon"><FlaskIcon className="btn-icon" /></span>
+              <span className="admin-tool-icon"><TestIcon className="btn-icon" /></span>
               <span className="admin-tool-title">Тест приложения</span>
               <span className="admin-tool-text">Пошаговый capture реального запроса из клиента и сбор профиля.</span>
             </button>
@@ -2233,34 +2739,31 @@ export default function App() {
           </div>
         </section>
 
-        <section className="admin-panel-grid">
-          <section className="sub-card admin-form">
-            <h2>Account управляет доступом</h2>
-            <p className="status">Пользователи, пароли и роли Sub Lab теперь берутся из account. Здесь список нужен для выбора получателей доступа к ссылкам.</p>
-          </section>
-        </section>
+        <SyncPeersPanel notify={notify} onSynced={() => { void reloadFavorites().catch(() => {}); }} />
 
-        <div className="status admin-status">{status}</div>
-
-        <section className="cards admin-users-list">
+        <section className="admin-section">
           <div className="admin-section-head">
             <h2>Пользователи</h2>
-            <p>Источник: account. Изменение ролей и паролей выполняется в account.</p>
+            <p>Источник — account: там же меняются роли и пароли. Здесь список нужен, чтобы выдавать доступ к ссылкам.</p>
           </div>
-          {adminUsers.map((u) => (
-            <article key={u.username} className="sub-card admin-user-card">
-              <div className="sub-head admin-user-head">
-                <div>
-                  <div className="sub-name">{u.username}</div>
-                  <div className="labels">
-                    <span className="label">{u.role}</span>
-                    {u.username === authUser?.username ? <span className="label">текущий аккаунт</span> : null}
+          {status ? <div className="status admin-status">{status}</div> : null}
+          <div className="cards admin-users-list">
+            {adminUsers.map((u) => (
+              <article key={u.username} className="card admin-user-card">
+                <div className="admin-user-row">
+                  <span className="me-avatar">{u.username.trim().charAt(0).toUpperCase()}</span>
+                  <div className="admin-user-main">
+                    <div className="sub-name">{u.username}</div>
+                    <div className="labels">
+                      <Badge tone={u.role === "admin" ? "accent" : undefined}>{u.accountRole || u.role}</Badge>
+                      {u.username === authUser?.username ? <Badge>это вы</Badge> : null}
+                    </div>
                   </div>
                 </div>
-              </div>
-            </article>
-          ))}
-          {adminUsers.length === 0 ? <article className="sub-card">Пользователи не найдены</article> : null}
+              </article>
+            ))}
+            {adminUsers.length === 0 ? <article className="card empty-state"><div className="empty-state-title">Пользователи не найдены</div><div className="empty-state-text">Проверьте, что account доступен и в нём есть группы sub_mirror.</div></article> : null}
+          </div>
         </section>
 
         {showMock ? (
@@ -2277,165 +2780,109 @@ export default function App() {
 
         {showProfileEditor ? (
           <Modal onClose={() => setShowProfileEditor(false)} title="Редактор профилей и UA" showCloseButton>
-            <div className="editor-layout">
-              <section className="editor-pane">
-                <h3 className="editor-heading">Профили</h3>
-                <div className="row">
-                  <select value={profileName} onChange={(e) => setProfileName(e.target.value)}>
-                    <option value="">Выберите профиль</option>
-                    {profileCatalog.profiles.map((x) => <option key={x} value={x}>{x}</option>)}
-                  </select>
-                  <TextInput placeholder="или имя нового профиля" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
-                </div>
-                {selectedProfileMeta ? (
-                  <div className="composer-meta-hint">
-                    Владелец: {selectedProfileMeta.ownerUsername || "shared"} · Тип: {selectedProfileMeta.visibility}
-                  </div>
-                ) : null}
-                <div className="profile-form-card">
-                  <label className="composer-label">Переопределение HWID</label>
-                  <div className="chip-row">
-                    <TipChipButton
-                      tip="Разрешить override hwid из запроса"
-                      className={`chip-btn ${profileForm.allowHwidOverride ? "active" : ""}`}
-                      onClick={() => setProfileForm((prev) => ({ ...prev, allowHwidOverride: true }))}
-                    >
-                      Разрешено
-                    </TipChipButton>
-                    <TipChipButton
-                      tip="Запретить override hwid из заголовков запроса"
-                      className={`chip-btn ${!profileForm.allowHwidOverride ? "active" : ""}`}
-                      onClick={() => setProfileForm((prev) => ({ ...prev, allowHwidOverride: false }))}
-                    >
-                      Запрещено
-                    </TipChipButton>
-                  </div>
-
-                  <label className="composer-label">Заголовки профиля</label>
-                  <div className="profile-headers-list">
-                    {profileForm.headers.length === 0 ? <div className="status">Заголовки не добавлены</div> : null}
-                    {profileForm.headers.map((row) => (
-                      <div key={row.id} className="profile-header-row">
-                        <TextInput
-                          placeholder="header-name"
-                          value={row.key}
-                          onChange={(e) => setProfileForm((prev) => ({
-                            ...prev,
-                            headers: prev.headers.map((item) => (item.id === row.id ? { ...item, key: e.target.value } : item)),
-                          }))}
-                        />
-                        <TextInput
-                          placeholder="value"
-                          value={row.value}
-                          onChange={(e) => setProfileForm((prev) => ({
-                            ...prev,
-                            headers: prev.headers.map((item) => (item.id === row.id ? { ...item, value: e.target.value } : item)),
-                          }))}
-                        />
-                        <TipIconButton
-                          tip="Удалить заголовок"
-                          aria-label="Удалить заголовок"
-                          icon={<TrashIcon className="btn-icon" />}
-                          onClick={() => setProfileForm((prev) => ({ ...prev, headers: prev.headers.filter((item) => item.id !== row.id) }))}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  <div className="toolbar">
-                    <TipButton
-                      tip="Добавить заголовок"
-                      className="btn"
-                      onClick={() => setProfileForm((prev) => ({
-                        ...prev,
-                        headers: [...prev.headers, { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, key: "", value: "" }],
-                      }))}
-                    >
-                      <PlusIcon className="btn-icon" /> Добавить заголовок
-                    </TipButton>
-                  </div>
-                </div>
-                <div className="toolbar">
-                  <TipButton tip="Загрузить выбранный профиль" className="btn" onClick={() => void loadProfileFile()}>Загрузить</TipButton>
-                  <TipButton tip="Сохранить профиль" className="btn" onClick={() => void saveProfileFile()}>Сохранить</TipButton>
-                  <TipButton tip="Удалить профиль" className="btn" onClick={() => void removeProfileFile()}>Удалить</TipButton>
-                </div>
-              </section>
-
-              <section className="editor-pane">
-                <h3 className="editor-heading">UA Каталог</h3>
-                <div className="row">
-                  <select value={selectedOs} onChange={(e) => setSelectedOs(e.target.value)}>
-                    <option value="">Выберите ОС</option>
-                    {osOptions.map((osName) => <option key={osName} value={osName}>{osName}</option>)}
-                  </select>
-                  <select value={payload.app || ""} onChange={(e) => setPayload((p) => ({ ...p, app: e.target.value }))}>
-                    <option value="">Выберите приложение</option>
-                    {appOptions.map((appName) => <option key={appName} value={appName}>{appName}</option>)}
-                  </select>
-                </div>
-                <label className="composer-label">Текущий User-Agent</label>
-                <Textarea readOnly value={uaPreview || "UA не найден"} />
-                <div className="status">UA берётся из каталога и автоматически применяется при запросах.</div>
-              </section>
-            </div>
+            {profileEditorContent}
           </Modal>
         ) : null}
         <NotificationToasts items={notifications} onDismiss={dismissNotification} />
-      </main>
+      </AppShell>
     );
   }
 
   return (
-    <main className="page">
-      {isAnyModalOpen ? null : topRightControls}
-      <HeroHeader
-        logoSrc={subLabIcon}
-        subtitle="Лаборатория подписок"
-      />
+    <AppShell
+      logoSrc={subLabIcon}
+      subtitle="Лаборатория подписок"
+      nav={shellNav}
+      navActions={canEditSubs ? mainQuickActions : null}
+      footer={topRightControls}
+    >
 
-      {canEditSubs ? (
-        <section className="top-actions">
-          <TipButton tip="Добавить новую подписку" tone="primary" className="btn" onClick={() => { resetComposer(); openModal("composer"); }}>
-            <PlusIcon className="btn-icon" /> Добавить
-          </TipButton>
-          <TipButton tip="Импортировать подписку по ссылке" className="btn" onClick={() => openModal("import")}>
-            <ImportIcon className="btn-icon" /> Импорт
-          </TipButton>
-          <TipButton tip="Скачать резервную копию всех доступных подписок" className="btn" onClick={downloadFavoritesBackup}>
-            <SaveIcon className="btn-icon" /> Резервная копия
-          </TipButton>
-          <TipButton tip="Восстановить подписки из резервной копии" className="btn" onClick={() => backupRestoreInputRef.current?.click()}>
-            <ImportIcon className="btn-icon" /> Восстановить
-          </TipButton>
-          <input ref={backupRestoreInputRef} type="file" accept="application/json,.json" hidden onChange={(e) => void handleRestoreFavoritesBackup(e)} />
-          {showAdvanced ? (
-            <>
-              <TipButton tip="Импортировать массовый файл прокси" className="btn" onClick={openBulkImportModal}>
-                <ImportIcon className="btn-icon" /> Массовый импорт
-              </TipButton>
-              <TipButton tip="Объединить несколько подписок в одну" className="btn" onClick={openMergeModal}>
-                <CopyIcon className="btn-icon" /> Объединить
-              </TipButton>
-              <TipButton tip="Пошагово проверить, какие заголовки реально отправляет приложение" className="btn" onClick={openAppTestModal}>
-                <FlaskIcon className="btn-icon" /> Тест приложения
-              </TipButton>
-              <TipButton tip="Переписать все сохраненные ссылки на текущий домен" className="btn" onClick={() => void rewriteFavoritesToCurrentOrigin()}>
-                <CopyIcon className="btn-icon" /> Обновить ссылки
-              </TipButton>
-            </>
-          ) : null}
-        </section>
-      ) : (
+      {canEditSubs ? null : (
         <section className="viewer-note">
           Доступные вам подписки. Откройте карточку, чтобы получить ссылку для приложения.
         </section>
       )}
 
+      <section className="page-head">
+        <div>
+          <h1>Подписки</h1>
+          <p>
+            {favorites.length === 0
+              ? "Здесь появятся ссылки для приложений"
+              : (listQuery.trim() || listOwnerFilter !== "visible"
+                ? `Показано ${visibleFavorites.length} из ${favorites.length}`
+                : `Всего подписок: ${visibleFavorites.length}`)}
+          </p>
+        </div>
+        {favorites.length > 0 ? (
+          <div className="head-actions">
+            {isAdminUser && foreignFavoritesCount > 0 ? (
+              <div className="list-filters" role="group" aria-label="Фильтр по владельцу">
+                {([
+                  ["visible", "Доступные мне", "Свои и выданные вам подписки"],
+                  ["mine", "Мои", "Только те, что вы создали сами"],
+                  ["shared", "Выданные мне", "Подписки, к которым вам дали доступ"],
+                  ["foreign", "Чужие", `Подписки других пользователей: ${foreignFavoritesCount}`],
+                  ["all", "Все", "Весь список без разбора владельца"],
+                ] as const).map(([key, label, tip]) => (
+                  <Tooltip key={key} content={tip}>
+                    <button
+                      type="button"
+                      className={`list-filter${listOwnerFilter === key ? " is-active" : ""}`}
+                      aria-pressed={listOwnerFilter === key}
+                      onClick={() => setListOwnerFilter(key)}
+                    >
+                      {label}
+                      {key === "foreign" ? <span className="list-filter-count">{foreignFavoritesCount}</span> : null}
+                    </button>
+                  </Tooltip>
+                ))}
+              </div>
+            ) : null}
+            <div className="list-search">
+              <input
+                type="search"
+                placeholder="Поиск по названию, ссылке, тегам"
+                value={listQuery}
+                onChange={(e) => setListQuery(e.target.value)}
+                aria-label="Поиск подписок"
+              />
+            </div>
+          </div>
+        ) : null}
+      </section>
+
       <section className="cards">
         {favorites.length === 0 ? (
-          <article className="sub-card">{canEditSubs ? "Еще не добавлена ни одна подписка." : "Вам пока не выдали ни одной подписки."}</article>
+          <article className="card empty-state">
+            <div className="empty-state-title">{canEditSubs ? "Пока пусто" : "Нет доступных подписок"}</div>
+            <div className="empty-state-text">
+              {canEditSubs
+                ? "Добавьте первую подписку или импортируйте существующую ссылку — она появится здесь карточкой."
+                : "Вам пока не выдали ни одной подписки. Как только доступ появится, она возникнет в этом списке."}
+            </div>
+            {canEditSubs ? (
+              <div className="toolbar">
+                <TipButton tip="Добавить новую подписку" tone="primary" onClick={() => { resetComposer(); openModal("composer"); }}>
+                  <PlusIcon className="btn-icon" /> Добавить подписку
+                </TipButton>
+              </div>
+            ) : null}
+          </article>
+        ) : visibleFavorites.length === 0 ? (
+          <article className="card empty-state">
+            <div className="empty-state-title">Ничего не найдено</div>
+            <div className="empty-state-text">
+              {listQuery.trim()
+                ? `По запросу «${listQuery.trim()}» нет подписок. Попробуйте другое название или тег.`
+                : "В этом фильтре подписок нет. Выберите другой набор или снимите фильтр."}
+            </div>
+            <div className="toolbar">
+              <TipButton tip="Сбросить поиск и фильтр" onClick={() => { setListQuery(""); setListOwnerFilter("visible"); }}>Сбросить фильтры</TipButton>
+            </div>
+          </article>
         ) : (
-          favorites.map((item, idx) => (
+          visibleFavorites.map(({ item, index: idx }) => (
             <SubscriptionCard
               key={`${item.shortId || item.title}-${item.ts}`}
               item={item}
@@ -2446,6 +2893,8 @@ export default function App() {
               onTest={() => void applySavedToTester(true, String(idx))}
               onShare={() => openShare(item)}
               onOpenUsers={() => void openSubUsers(item)}
+              onOpenAccess={isAdminUser ? () => openAccess(item) : undefined}
+              onPing={() => openPing(item)}
               onOpenOverrides={() => void openOverrides(item)}
             />
           ))
@@ -2453,18 +2902,47 @@ export default function App() {
       </section>
 
       {showImport ? (
-        <Modal onClose={() => setShowImport(false)} title="Импорт" showCloseButton>
-          <TextInput placeholder="Вставьте /sub /last /l/..." value={importUrl} onChange={(e) => setImportUrl(e.target.value)} />
-          <div className="toolbar"><TipButton tip="Применить импортированную ссылку" tone="primary" className="btn" onClick={() => void applyImport()}>Применить</TipButton></div>
+        <Modal
+          onClose={() => setShowImport(false)}
+          title="Импорт подписки"
+          showCloseButton
+          lead="Вставьте ссылку вида /sub, /last или /l/&lt;id&gt; — поля конструктора заполнятся сами."
+          footer={(
+            <TipButton tip="Применить импортированную ссылку" tone="primary" onClick={() => void applyImport()}>
+              <ImportIcon className="btn-icon" /> Применить
+            </TipButton>
+          )}
+        >
+          <div className="field">
+            <span className="field-label">Ссылка</span>
+            <TextInput placeholder="https://example.com/l/my-sub" value={importUrl} onChange={(e) => setImportUrl(e.target.value)} />
+          </div>
         </Modal>
       ) : null}
 
       {showBulkImport ? (
-        <Modal onClose={() => setShowBulkImport(false)} title="Массовый импорт" showCloseButton>
+        <Modal
+          onClose={() => setShowBulkImport(false)}
+          title="Массовый импорт"
+          showCloseButton
+          footer={(
+            <>
+              <TipButton tip="Создать подписки из отфильтрованного списка" tone="primary" onClick={() => void handleCreateBulkImportedSubscriptions()}>
+                <PlusIcon className="btn-icon" /> Создать подписки
+              </TipButton>
+              <span className="modal-footer-note">После фильтрации: {bulkImportFilteredItems.length} из {bulkImportItems.length}</span>
+            </>
+          )}
+        >
+          <section className="form-section">
+          <div className="form-section-head">
+            <div className="form-section-title">Файл с прокси</div>
+            <div className="form-section-lead">Текстовый файл, по одной ссылке на строку.</div>
+          </div>
           <label className="composer-label">Файл</label>
           <div className="url-row">
             <TextInput placeholder="Выберите текстовый файл с proxy-ссылками" value={bulkImportFileName} onChange={() => {}} readOnly />
-            <TipButton tip="Выбрать файл для импорта" tone="primary" className="btn" onClick={() => bulkImportFileInputRef.current?.click()}>Выбрать файл</TipButton>
+            <TipButton tip="Выбрать файл для импорта" tone="primary" onClick={() => bulkImportFileInputRef.current?.click()}>Выбрать файл</TipButton>
             <input ref={bulkImportFileInputRef} type="file" accept=".txt,.log,.conf,text/plain" hidden onChange={(e) => void handleBulkImportFilePicked(e)} />
           </div>
           <div className="composer-meta-hint">Найдено прокси: {bulkImportItems.length}</div>
@@ -2473,14 +2951,19 @@ export default function App() {
           <TextInput placeholder="Название набора" value={bulkImportName} onChange={(e) => setBulkImportName(e.target.value)} />
 
           <label className="composer-label">Выходной формат</label>
-          <div className="chip-row">
-            <TipChipButton tip="Формат YAML" className={`chip-btn ${bulkImportOutput === "yml" ? "active" : ""}`} onClick={() => setBulkImportOutput("yml")}>yml</TipChipButton>
-            <TipChipButton tip="Формат RAW" className={`chip-btn ${bulkImportOutput === "raw" ? "active" : ""}`} onClick={() => setBulkImportOutput("raw")}>raw</TipChipButton>
-            <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${bulkImportOutput === "raw_base64" ? "active" : ""}`} onClick={() => setBulkImportOutput("raw_base64")}>raw (base64)</TipChipButton>
-            <TipChipButton tip="Формат JSON" className={`chip-btn ${bulkImportOutput === "json" ? "active" : ""}`} onClick={() => setBulkImportOutput("json")}>json</TipChipButton>
-          </div>
+          <Segmented
+            ariaLabel="Выходной формат"
+            value={String(bulkImportOutput)}
+            onChange={(value) => setBulkImportOutput(value as SubscriptionPayload["output"])}
+            options={OUTPUT_OPTIONS}
+          />
+          </section>
 
-          <label className="composer-label">Фильтры</label>
+          <section className="form-section">
+          <div className="form-section-head">
+            <div className="form-section-title">Фильтры</div>
+            <div className="form-section-lead">Оставить только нужные серверы и при желании разбить на части.</div>
+          </div>
           <div className="row">
             <select value={bulkImportCountry} onChange={(e) => setBulkImportCountry(e.target.value)}>
               <option value="">Все страны</option>
@@ -2493,8 +2976,13 @@ export default function App() {
             <TextInput placeholder="Размер части, 0 = без деления" value={bulkImportSplitSize} onChange={(e) => setBulkImportSplitSize(e.target.value)} />
           </div>
           <div className="composer-meta-hint">После фильтрации: {bulkImportFilteredItems.length}</div>
+          </section>
 
-          <label className="composer-label">Предпросмотр</label>
+          <section className="form-section">
+          <div className="form-section-head">
+            <div className="form-section-title">Предпросмотр</div>
+            <div className="form-section-lead">Первые 200 записей из отобранных.</div>
+          </div>
           <div className="bulk-import-preview">
             {bulkImportFilteredItems.slice(0, 200).map((item) => (
               <article key={`${item.index}-${item.server}-${item.port}`} className="bulk-import-item">
@@ -2515,302 +3003,370 @@ export default function App() {
               </article>
             ))}
           </div>
-          <div className="toolbar">
-            <TipButton tip="Создать подписки из отфильтрованного списка" tone="primary" className="btn" onClick={() => void handleCreateBulkImportedSubscriptions()}>
-              Создать подписки
-            </TipButton>
-          </div>
+          </section>
         </Modal>
+      ) : null}
+
+      {showPing && pingItem ? (
+        <PingModal
+          title={pingItem.title}
+          data={pingData}
+          loading={pingLoading}
+          error={pingError}
+          mode={pingMode}
+          onModeChange={(value) => { setPingMode(value); void runPing(pingItem, value, pingAttempts); }}
+          attempts={pingAttempts}
+          onAttemptsChange={(value) => { setPingAttempts(value); void runPing(pingItem, pingMode, value); }}
+          onRun={() => void runPing(pingItem, pingMode, pingAttempts)}
+          onClose={() => setShowPing(false)}
+        />
       ) : null}
 
       {showMerge ? (
-        <Modal onClose={() => setShowMerge(false)} title="Объединение подписок" showCloseButton>
-          <label className="composer-label">Название</label>
-          <TextInput placeholder="Название объединенной подписки" value={mergeName} onChange={(e) => setMergeName(e.target.value)} />
-
-          <label className="composer-label">Выходной формат</label>
-          <div className="chip-row">
-            <TipChipButton tip="Формат YAML" className={`chip-btn ${mergeOutput === "yml" ? "active" : ""}`} onClick={() => setMergeOutput("yml")}>yml</TipChipButton>
-            <TipChipButton tip="Формат RAW" className={`chip-btn ${mergeOutput === "raw" ? "active" : ""}`} onClick={() => setMergeOutput("raw")}>raw</TipChipButton>
-            <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${mergeOutput === "raw_base64" ? "active" : ""}`} onClick={() => setMergeOutput("raw_base64")}>raw (base64)</TipChipButton>
-            <TipChipButton tip="Формат JSON" className={`chip-btn ${mergeOutput === "json" ? "active" : ""}`} onClick={() => setMergeOutput("json")}>json</TipChipButton>
-          </div>
-
-          <label className="composer-label">Подписки для объединения</label>
-          <div className="merge-list">
-            {favorites.length === 0 ? (
-              <div className="status">Нет настроенных подписок для объединения.</div>
-            ) : favorites.map((item, idx) => (
-              <label key={`${item.shortId || item.title}-${idx}`} className="merge-item">
-                <input
-                  type="checkbox"
-                  checked={Boolean(mergeSelection[String(idx)])}
-                  onChange={(e) => setMergeSelection((prev) => ({ ...prev, [String(idx)]: e.target.checked }))}
-                />
-                <span className="merge-item-main">
-                  <strong>{item.title}</strong>
-                  <span className="merge-item-sub">{formatLabelFromPayload(item.payload)} · {item.payload.app || "-"} · {item.payload.device || "-"}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-          <div className="status">Выбрано: {selectedMergeIndexes.length}</div>
-          <div className="toolbar">
-            <TipButton tip="Создать новую объединенную подписку" tone="primary" className="btn" onClick={() => void handleCreateMergedSubscription()}>
-              Создать объединение
-            </TipButton>
-          </div>
-        </Modal>
+        <MergeModal
+          mergeId={mergeId}
+          name={mergeName}
+          onNameChange={setMergeName}
+          output={mergeOutput}
+          onOutputChange={setMergeOutput}
+          outputAuto={mergeOutputAuto}
+          onOutputAutoChange={setMergeOutputAuto}
+          outputOptions={OUTPUT_OPTIONS}
+          items={mergeItems}
+          onItemsChange={setMergeItems}
+          preview={mergePreview}
+          previewLoading={mergePreviewLoading}
+          onPreview={() => void runMergePreview()}
+          onSave={() => void handleSaveMerge()}
+          onClose={() => setShowMerge(false)}
+          saving={mergeSaving}
+          note={mergeId ? "адрес подписки не меняется" : ""}
+        />
       ) : null}
 
       {showComposer ? (
-        <Modal onClose={() => setShowComposer(false)} title={showAdvanced ? "Конструктор подписки" : (editingIndex >= 0 ? "Изменить подписку" : "Новая подписка")} showCloseButton>
+        <Modal
+          onClose={() => setShowComposer(false)}
+          title={showAdvanced ? "Конструктор подписки" : (editingIndex >= 0 ? "Изменить подписку" : "Новая подписка")}
+          showCloseButton
+          footer={(
+            <>
+              <TipButton tip="Сохранить подписку" tone="primary" onClick={() => void handleSave(false)}>
+                <SaveIcon className="btn-icon" /> Сохранить
+              </TipButton>
+              <TipButton tip="Сохранить как новую подписку" onClick={() => void handleSave(true)}>
+                <SaveAsIcon className="btn-icon" /> Сохранить как
+              </TipButton>
+              <TipButton tip="Закрыть без сохранения" onClick={() => setShowComposer(false)}>
+                <CloseIcon className="btn-icon" /> Закрыть
+              </TipButton>
+              {showAdvanced ? (
+                <TipIconButton tip="Открыть тестер" aria-label="Открыть тестер" icon={<FlaskIcon className="btn-icon" />} onClick={() => openModal("tester")} />
+              ) : null}
+              {status ? <span className="modal-footer-note">{status}</span> : null}
+            </>
+          )}
+        >
           {showAdvanced ? null : (
             <div className="composer-hint">
               Укажите название и ссылку на подписку провайдера. Формат, группы и заголовки приложения
               подставятся сами.
             </div>
           )}
-          <label className="composer-label">Название</label>
-          <TextInput placeholder="Название подписки" value={name} onChange={(e) => setName(e.target.value)} />
 
-          {showAdvanced ? (
-            <>
-              <label className="composer-label">Короткая ссылка</label>
-              <TextInput
-                placeholder="my-sub или оставить пустым для генерации"
-                value={shortIdDraft}
-                onChange={(e) => setShortIdDraft(e.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80))}
-              />
-              <label className="composer-label">Теги</label>
-              <TextInput
-                placeholder="router, home"
-                value={tagsDraft}
-                onChange={(e) => setTagsDraft(e.target.value)}
-              />
-              <label className="share-access-row">
-                <span>Скрыть подписку по короткой ссылке</span>
-                <input type="checkbox" checked={hiddenDraft} onChange={(e) => setHiddenDraft(e.target.checked)} />
-              </label>
-              {hiddenDraft ? <div className="composer-meta-hint">Публичные `/l/{shortIdDraft || "..."}` и meta API будут отвечать 404. Владелец и админ смогут редактировать подписку в кабинете.</div> : null}
-            </>
-          ) : null}
+          <div className="form-stack">
+            <section className="form-section">
+              <div className="form-section-head">
+                <div className="form-section-title">Основное</div>
+                <div className="form-section-lead">Как подписка называется и откуда берутся серверы.</div>
+              </div>
 
-          <label className="composer-label">Источник</label>
-          {showAdvanced ? (
-            <div className="chip-row">
-              <TipChipButton tip="Загрузить источник по URL" className={`chip-btn ${composerSourceMode === "url" ? "active" : ""}`} onClick={() => setComposerSourceMode("url")}>URL</TipChipButton>
-              <TipChipButton tip="Загрузить файл со списком адресов" className={`chip-btn ${composerSourceMode === "file" ? "active" : ""}`} onClick={() => setComposerSourceMode("file")}>Файл</TipChipButton>
-              <TipChipButton tip="Вставить список адресов вручную" className={`chip-btn ${composerSourceMode === "text" ? "active" : ""}`} onClick={() => setComposerSourceMode("text")}>Поле</TipChipButton>
-            </div>
-          ) : null}
-          {composerSourceMode === "url" ? (
-            <>
-              <div className="url-row">
-                <TextInput
-                  placeholder="URL или встроенный файл, например bypass-all.txt"
-                  value={payload.sub_url}
-                  onChange={(e) => {
-                    const nextValue = e.target.value;
-                    setPayload({ ...payload, sub_url: nextValue });
-                    if (nextValue.trim() !== originalHappUrl.trim()) {
-                      setOriginalHappUrl("");
-                      setHappDecryptStatus("");
-                    }
-                    if (nextValue.trim() !== happDecryptDismissedUrl.trim()) {
-                      setHappDecryptDismissedUrl("");
-                    }
-                  }}
+              <div className="field">
+                <span className="field-label">Название</span>
+                <TextInput placeholder="Название подписки" value={name} onChange={(e) => setName(e.target.value)} />
+              </div>
+
+              {showAdvanced ? (
+                <>
+                  <div className="field-row">
+                    <div className="field">
+                      <span className="field-label">Короткая ссылка</span>
+                      <TextInput
+                        placeholder="my-sub или пусто для генерации"
+                        value={shortIdDraft}
+                        onChange={(e) => setShortIdDraft(e.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80))}
+                      />
+                    </div>
+                    <div className="field">
+                      <span className="field-label">Теги</span>
+                      <TextInput placeholder="router, home" value={tagsDraft} onChange={(e) => setTagsDraft(e.target.value)} />
+                    </div>
+                  </div>
+                  <label className="switch-row">
+                    <span>Скрыть подписку по короткой ссылке</span>
+                    <input type="checkbox" checked={hiddenDraft} onChange={(e) => setHiddenDraft(e.target.checked)} />
+                  </label>
+                  {hiddenDraft ? (
+                    <div className="composer-meta-hint">
+                      Публичные `/l/{shortIdDraft || "..."}` и meta API будут отвечать 404. Владелец и админ смогут редактировать подписку в кабинете.
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+
+              <div className="field">
+                <span className="field-label">Источник</span>
+                {showAdvanced ? (
+                  <Segmented
+                    ariaLabel="Тип источника"
+                    value={composerSourceMode}
+                    onChange={(value) => setComposerSourceMode(value as ComposerSourceMode)}
+                    options={[
+                      { value: "url", label: "URL", tip: "Загрузить источник по URL" },
+                      { value: "file", label: "Файл", tip: "Загрузить файл со списком адресов" },
+                      { value: "text", label: "Поле", tip: "Вставить список адресов вручную" },
+                    ]}
+                  />
+                ) : null}
+                {composerSourceMode === "url" ? (
+                  <>
+                    <TextInput
+                      placeholder="URL или встроенный файл, например bypass-all.txt"
+                      value={payload.sub_url}
+                      onChange={(e) => {
+                        const nextValue = e.target.value;
+                        setPayload({ ...payload, sub_url: nextValue });
+                        if (nextValue.trim() !== originalHappUrl.trim()) {
+                          setOriginalHappUrl("");
+                          setHappDecryptStatus("");
+                        }
+                        if (nextValue.trim() !== happDecryptDismissedUrl.trim()) {
+                          setHappDecryptDismissedUrl("");
+                        }
+                      }}
+                    />
+                    {happDecryptStatus ? <div className="composer-meta-hint">{happDecryptStatus}</div> : null}
+                    {originalHappUrl ? (
+                      <button
+                        type="button"
+                        className="composer-original-link"
+                        onClick={() => {
+                          void copyToClipboard(originalHappUrl);
+                          notify("info", "Оригинальная happ-ссылка скопирована");
+                        }}
+                      >
+                        Оригинал: {originalHappUrl}
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
+                {composerSourceMode === "file" ? (
+                  <>
+                    <div className="url-row">
+                      <TextInput placeholder="Выберите файл со списком vless://..." value={composerFileName} onChange={() => {}} readOnly />
+                      <TipButton tip="Выбрать файл источника" onClick={() => composerFileInputRef.current?.click()}>Выбрать файл</TipButton>
+                      <input ref={composerFileInputRef} type="file" accept=".txt,.log,.conf,text/plain" hidden onChange={(e) => void handleComposerFilePicked(e)} />
+                    </div>
+                    <Textarea rows={10} placeholder="Содержимое файла появится здесь" value={composerFileBody} onChange={(e) => setComposerFileBody(e.target.value)} />
+                    <div className="composer-meta-hint">Серверов найдено: {composerFileServersCount}</div>
+                  </>
+                ) : null}
+                {composerSourceMode === "text" ? (
+                  <>
+                    <Textarea rows={10} placeholder={"Вставьте vless:// адреса, по одному на строку"} value={composerTextBody} onChange={(e) => setComposerTextBody(e.target.value)} />
+                    <div className="composer-meta-hint">Серверов найдено: {composerTextServersCount}</div>
+                  </>
+                ) : null}
+              </div>
+
+              {showAdvanced ? (
+                <div className="field">
+                  <span className="field-label">Режим выдачи</span>
+                  <Segmented
+                    ariaLabel="Режим выдачи"
+                    value={payload.endpoint === "sub" ? "sub" : "last"}
+                    onChange={(value) => setPayload({ ...payload, endpoint: value === "sub" ? "sub" : "last" })}
+                    options={[
+                      { value: "last", label: "С кэшем", tip: "Отдавать последнюю успешную версию из кэша" },
+                      { value: "sub", label: "Без кэша", tip: "Каждый раз запрашивать источник заново" },
+                    ]}
+                  />
+                </div>
+              ) : null}
+            </section>
+
+            <section className="form-section">
+              <div className="form-section-head">
+                <div className="form-section-title">Формат выдачи</div>
+                <div className="form-section-lead">В каком виде приложение получит подписку.</div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">Формат</span>
+                <Segmented
+                  ariaLabel="Формат"
+                  value={String(payload.output || "yml")}
+                  onChange={(value) => setPayload({ ...payload, output: value as SubscriptionPayload["output"] })}
+                  options={[
+                    { value: "yml", label: "yml", tip: "Формат YAML" },
+                    { value: "raw", label: "raw", tip: "Формат RAW" },
+                    { value: "raw_base64", label: "raw (base64)", tip: "Формат RAW в base64" },
+                    { value: "json", label: "json", tip: "Формат JSON" },
+                  ]}
                 />
               </div>
-              {happDecryptStatus ? <div className="composer-meta-hint">{happDecryptStatus}</div> : null}
-              {originalHappUrl ? (
-                <button
-                  type="button"
-                  className="composer-original-link"
-                  onClick={() => {
-                    void copyToClipboard(originalHappUrl);
-                    notify("info", "Оригинальная happ-ссылка скопирована");
-                  }}
-                >
-                  Оригинал: {originalHappUrl}
-                </button>
+
+              <label className="switch-row">
+                <span className="switch-row-text">
+                  Выбирать формат по User-Agent
+                  <span className="composer-meta-hint">Если UA нет или он не распознан, берётся формат выше.</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(payload.output_auto)}
+                  onChange={(e) => setPayload({ ...payload, output_auto: e.target.checked ? "1" : "" })}
+                />
+              </label>
+
+              {showAdvanced ? (
+                <>
+                  <div className="field">
+                    <span className="field-label">Серверы из JSON-подписки</span>
+                    <Segmented
+                      ariaLabel="Серверы из JSON-подписки"
+                      value={String(payload.nodes || "collapse")}
+                      onChange={(value) => setPayload({ ...payload, nodes: value as SubscriptionPayload["nodes"] })}
+                      options={NODES_MODE_OPTIONS.map((option) => ({ value: option.value, label: option.label, tip: option.tip }))}
+                    />
+                  </div>
+                  <div className="composer-hint">
+                    Обратная конвертация в исходный формат (json → json) отдаёт подписку как есть и этот выбор не учитывает.
+                  </div>
+                </>
               ) : null}
-            </>
-          ) : null}
-          {composerSourceMode === "file" ? (
-            <>
-              <div className="url-row">
-                <TextInput placeholder="Выберите файл со списком vless://..." value={composerFileName} onChange={() => {}} readOnly />
-                <TipButton tip="Выбрать файл источника" tone="primary" className="btn" onClick={() => composerFileInputRef.current?.click()}>Выбрать файл</TipButton>
-                <input ref={composerFileInputRef} type="file" accept=".txt,.log,.conf,text/plain" hidden onChange={(e) => void handleComposerFilePicked(e)} />
-              </div>
-              <Textarea rows={10} placeholder="Содержимое файла появится здесь" value={composerFileBody} onChange={(e) => setComposerFileBody(e.target.value)} />
-              <div className="composer-meta-hint">Серверов найдено: {composerFileServersCount}</div>
-            </>
-          ) : null}
-          {composerSourceMode === "text" ? (
-            <>
-              <Textarea rows={10} placeholder={"Вставьте vless:// адреса, по одному на строку"} value={composerTextBody} onChange={(e) => setComposerTextBody(e.target.value)} />
-              <div className="composer-meta-hint">Серверов найдено: {composerTextServersCount}</div>
-            </>
-          ) : null}
-          {showAdvanced ? (
-            <div className="chip-row">
-              <TipChipButton
-                tip="Переключить режим выдачи"
-                className="chip-btn chip-toggle"
-                onClick={() => setPayload({ ...payload, endpoint: payload.endpoint === "last" ? "sub" : "last" })}
-              >
-                {payload.endpoint === "last" ? "С кэшем" : "Без кэша"}
-              </TipChipButton>
-            </div>
-          ) : null}
+            </section>
 
-          <label className="composer-label">Формат</label>
-          <div className="chip-row">
-            <TipChipButton
-              tip="Автоматически выбирать output по входному User-Agent. Если UA нет или он не распознан, используется выбранный ниже формат."
-              className={`chip-btn chip-toggle ${payload.output_auto ? "active" : ""}`}
-              onClick={() => setPayload({ ...payload, output_auto: payload.output_auto ? "" : "1" })}
-            >
-              auto по UA
-            </TipChipButton>
-          </div>
-          <div className="chip-row">
-            <TipChipButton tip="Формат YAML" className={`chip-btn ${payload.output === "yml" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "yml" })}>yml</TipChipButton>
-            <TipChipButton tip="Формат RAW" className={`chip-btn ${payload.output === "raw" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "raw" })}>raw</TipChipButton>
-            <TipChipButton tip="Формат RAW в base64" className={`chip-btn ${payload.output === "raw_base64" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "raw_base64" })}>raw (base64)</TipChipButton>
-            <TipChipButton tip="Формат JSON" className={`chip-btn ${payload.output === "json" ? "active" : ""}`} onClick={() => setPayload({ ...payload, output: "json" })}>json</TipChipButton>
-          </div>
-
-          {showAdvanced ? (
-          <>
-          <label className="composer-label">Серверы из JSON-подписки</label>
-          <div className="chip-row">
-            {NODES_MODE_OPTIONS.map((option) => (
-              <TipChipButton
-                key={option.value}
-                tip={option.tip}
-                className={`chip-btn ${(payload.nodes || "collapse") === option.value ? "active" : ""}`}
-                onClick={() => setPayload({ ...payload, nodes: option.value })}
-              >
-                {option.label}
-              </TipChipButton>
-            ))}
-          </div>
-          <div className="composer-hint">
-            Обратная конвертация в исходный формат (json → json) отдаёт подписку как есть и этот выбор не учитывает.
-          </div>
-
-          <label className="composer-label">Группы Clash</label>
-          <div className="chip-row">
-            {CLASH_GROUP_PRESETS.map((entry) => (
-              <TipChipButton
-                key={"preset" in entry ? entry.preset : entry.type}
-                tip={`Добавить группу ${entry.name}`}
-                className={`chip-btn ${hasClashGroup(currentClashGroups, entry) ? "active" : ""}`}
-                onClick={() => updateClashGroups(toggleClashGroup(currentClashGroups, entry))}
-              >
-                {entry.name}
-              </TipChipButton>
-            ))}
-          </div>
-          <div className="url-row">
-            <TextInput placeholder="Название группы" value={clashGroupName} onChange={(e) => setClashGroupName(e.target.value)} />
-            <TextInput placeholder="Регулярка, например Finland|🇫🇮" value={clashGroupRegex} onChange={(e) => setClashGroupRegex(e.target.value)} />
-            <TipButton tip="Добавить группу по регулярке" className="btn" onClick={addRegexClashGroup}>Regex</TipButton>
-          </div>
-          <div className="url-row">
-            <TextInput placeholder="Страны/токены через запятую: 🇫🇮, Финляндия, Finland" value={clashGroupCountries} onChange={(e) => setClashGroupCountries(e.target.value)} />
-            <TipButton tip="Добавить группу по списку стран" className="btn" onClick={addCountryClashGroup}>Страны</TipButton>
-          </div>
-          {currentClashGroups.length > 0 ? (
-            <div className="labels">
-              {currentClashGroups.map((group, idx) => (
-                <Badge key={`${group.name || group.preset || group.regex}-${idx}`} className="label">
-                  {group.name || group.preset || group.regex}
-                  <button type="button" className="mini-link" onClick={() => updateClashGroups(currentClashGroups.filter((_, i) => i !== idx))}> ×</button>
-                </Badge>
-              ))}
-            </div>
-          ) : <div className="composer-meta-hint">Группы создаются только если найдено больше одного сервера. Одиночные серверы остаются без отдельной подгруппы.</div>}
-          </>
-          ) : null}
-
-          <label className="composer-label">ОС</label>
-          <div className="chip-row">
-            {osOptions.length === 0 ? <span className="status">UA-каталог пуст</span> : null}
-            {osOptions.map((osName) => (
-              <TipChipButton
-                tip={`ОС: ${osName}`}
-                key={osName}
-                className={`chip-btn ${selectedOs === osName ? "active" : ""}`}
-                onClick={() => {
-                  const apps = appsCatalog.length > 0 ? appsCatalog : Object.keys(uaCatalog.options[osName] || {});
-                  setSelectedOs(osName);
-                  setPayload((prev) => ({
-                    ...prev,
-                    device: osName,
-                    app: apps.includes(String(prev.app || "")) ? String(prev.app || "") : (apps[0] || String(prev.app || "")),
-                  }));
-                }}
-              >
-                {osName}
-              </TipChipButton>
-            ))}
-          </div>
-
-          <label className="composer-label">Приложение</label>
-          <div className="chip-row">
-            {appOptions.map((appName) => (
-              <TipChipButton
-                tip={`Приложение: ${appName}`}
-                key={appName}
-                className={`chip-btn ${payload.app === appName ? "active" : ""}`}
-                onClick={() => setPayload({ ...payload, app: appName })}
-              >
-                {appName}
-              </TipChipButton>
-            ))}
-          </div>
-
-          {showAdvanced ? (
-          <>
-          <label className="composer-label">Предустановки</label>
-          <div className="chip-row">
-            <TipChipButton tip="Без предустановки" className={`chip-btn ${!payload.profile ? "active" : ""}`} onClick={() => setPayload({ ...payload, profile: "" })}>Без профиля</TipChipButton>
-            {profileCatalog.profiles.map((profileName) => (
-              <TipChipButton tip={`Предустановка: ${profileName}`} key={profileName} className={`chip-btn ${payload.profile === profileName ? "active" : ""}`} onClick={() => setPayload({ ...payload, profile: profileName })}>
-                {profileName}
-              </TipChipButton>
-            ))}
-          </div>
-
-          <label className="composer-label">HWID</label>
-          <div className="hwid-row">
-            <TextInput placeholder="hwid" value={payload.hwid || ""} onChange={(e) => setPayload({ ...payload, hwid: e.target.value })} />
-            <TipIconButton
-              tip="Сгенерировать случайный HWID"
-              aria-label="Сгенерировать HWID"
-              icon={<DiceIcon className="btn-icon" />}
-              onClick={() => setPayload((prev) => ({ ...prev, hwid: generateHwidByOs(selectedOs || prev.device || "") }))}
-            />
-          </div>
-          </>
-          ) : null}
-          <div className="toolbar">
-            <TipButton tip="Сохранить подписку" tone="primary" className="btn" onClick={() => void handleSave(false)}>
-              <SaveIcon className="btn-icon" /> Сохранить
-            </TipButton>
-            <TipButton tip="Сохранить как новую подписку" className="btn" onClick={() => void handleSave(true)}>
-              <SaveAsIcon className="btn-icon" /> Сохранить как
-            </TipButton>
             {showAdvanced ? (
-              <TipIconButton tip="Открыть тестер" aria-label="Открыть тестер" icon={<FlaskIcon className="btn-icon" />} onClick={() => openModal("tester")} />
+              <section className="form-section">
+                <div className="form-section-head">
+                  <div className="form-section-title">Группы Clash</div>
+                  <div className="form-section-lead">Готовые наборы или своя выборка по регулярке и странам.</div>
+                </div>
+                <div className="chip-row">
+                  {CLASH_GROUP_PRESETS.map((entry) => (
+                    <TipChipButton
+                      key={"preset" in entry ? entry.preset : entry.type}
+                      tip={`Добавить группу ${entry.name}`}
+                      className={`chip-btn ${hasClashGroup(currentClashGroups, entry) ? "active" : ""}`}
+                      onClick={() => updateClashGroups(toggleClashGroup(currentClashGroups, entry))}
+                    >
+                      {entry.name}
+                    </TipChipButton>
+                  ))}
+                </div>
+                <div className="url-row">
+                  <TextInput placeholder="Название группы" value={clashGroupName} onChange={(e) => setClashGroupName(e.target.value)} />
+                  <TextInput placeholder="Регулярка, например Finland|🇫🇮" value={clashGroupRegex} onChange={(e) => setClashGroupRegex(e.target.value)} />
+                  <TipButton tip="Добавить группу по регулярке" onClick={addRegexClashGroup}>Regex</TipButton>
+                </div>
+                <div className="url-row">
+                  <TextInput placeholder="Страны/токены через запятую: 🇫🇮, Финляндия, Finland" value={clashGroupCountries} onChange={(e) => setClashGroupCountries(e.target.value)} />
+                  <TipButton tip="Добавить группу по списку стран" onClick={addCountryClashGroup}>Страны</TipButton>
+                </div>
+                {currentClashGroups.length > 0 ? (
+                  <div className="labels">
+                    {currentClashGroups.map((group, idx) => (
+                      <Badge key={`${group.name || group.preset || group.regex}-${idx}`} tone="accent">
+                        {group.name || group.preset || group.regex}
+                        <button type="button" className="mini-link" onClick={() => updateClashGroups(currentClashGroups.filter((_, i) => i !== idx))}> ×</button>
+                      </Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="composer-meta-hint">
+                    Группы создаются только если найдено больше одного сервера. Одиночные серверы остаются без отдельной подгруппы.
+                  </div>
+                )}
+              </section>
             ) : null}
+
+            <section className="form-section">
+              <div className="form-section-head">
+                <div className="form-section-title">Устройство и приложение</div>
+                <div className="form-section-lead">Отсюда берутся User-Agent и заголовки запроса.</div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">ОС</span>
+                <div className="chip-row">
+                  {osOptions.length === 0 ? <span className="status">UA-каталог пуст</span> : null}
+                  {osOptions.map((osName) => (
+                    <TipChipButton
+                      tip={`ОС: ${osName}`}
+                      key={osName}
+                      className={`chip-btn ${selectedOs === osName ? "active" : ""}`}
+                      onClick={() => {
+                        const apps = appsCatalog.length > 0 ? appsCatalog : Object.keys(uaCatalog.options[osName] || {});
+                        setSelectedOs(osName);
+                        setPayload((prev) => ({
+                          ...prev,
+                          device: osName,
+                          app: apps.includes(String(prev.app || "")) ? String(prev.app || "") : (apps[0] || String(prev.app || "")),
+                        }));
+                      }}
+                    >
+                      {osName}
+                    </TipChipButton>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <span className="field-label">Приложение</span>
+                <div className="chip-row">
+                  {appOptions.map((appName) => (
+                    <TipChipButton
+                      tip={`Приложение: ${appName}`}
+                      key={appName}
+                      className={`chip-btn ${payload.app === appName ? "active" : ""}`}
+                      onClick={() => setPayload({ ...payload, app: appName })}
+                    >
+                      {appName}
+                    </TipChipButton>
+                  ))}
+                </div>
+              </div>
+
+              {showAdvanced ? (
+                <>
+                  <div className="field">
+                    <span className="field-label">Предустановки</span>
+                    <div className="chip-row">
+                      <TipChipButton tip="Без предустановки" className={`chip-btn ${!payload.profile ? "active" : ""}`} onClick={() => setPayload({ ...payload, profile: "" })}>Без профиля</TipChipButton>
+                      {profileCatalog.profiles.map((profileName) => (
+                        <TipChipButton tip={`Предустановка: ${profileName}`} key={profileName} className={`chip-btn ${payload.profile === profileName ? "active" : ""}`} onClick={() => setPayload({ ...payload, profile: profileName })}>
+                          {profileName}
+                        </TipChipButton>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="field">
+                    <span className="field-label">HWID</span>
+                    <div className="hwid-row">
+                      <TextInput placeholder="hwid" value={payload.hwid || ""} onChange={(e) => setPayload({ ...payload, hwid: e.target.value })} />
+                      <TipIconButton
+                        tip="Сгенерировать случайный HWID"
+                        aria-label="Сгенерировать HWID"
+                        icon={<DiceIcon className="btn-icon" />}
+                        onClick={() => setPayload((prev) => ({ ...prev, hwid: generateHwidByOs(selectedOs || prev.device || "") }))}
+                      />
+                    </div>
+                  </div>
+                </>
+              ) : null}
+            </section>
           </div>
-          <div className="status">{status}</div>
         </Modal>
       ) : null}
 
@@ -2822,13 +3378,14 @@ export default function App() {
           }}
           title="Расшифровать Happ-ссылку"
           showCloseButton
-        >
-          <div className="happ-decrypt-dialog">
-            <div className="status">Обнаружена ссылка вида `happ://crypt...`. Можно сразу расшифровать её и сохранить в подписке уже обычный URL.</div>
-            <div className="toolbar">
+          lead="Обнаружена ссылка вида happ://crypt… — её можно сразу расшифровать и сохранить в подписке обычный URL."
+          footer={(
+            <>
+              <TipButton tip="Расшифровать ссылку через binary" tone="primary" onClick={() => void applyHappDecryption()} disabled={happDecryptLoading}>
+                {happDecryptLoading ? "Расшифровка..." : "Расшифровать"}
+              </TipButton>
               <TipButton
                 tip="Оставить исходную happ-ссылку без расшифровки"
-                className="btn"
                 onClick={() => {
                   setHappDecryptDismissedUrl(String(payload.sub_url || "").trim());
                   setShowHappDecryptPrompt(false);
@@ -2836,18 +3393,28 @@ export default function App() {
               >
                 Не расшифровывать
               </TipButton>
-              <TipButton tip="Расшифровать ссылку через binary" tone="primary" className="btn" onClick={() => void applyHappDecryption()} disabled={happDecryptLoading}>
-                {happDecryptLoading ? "Расшифровка..." : "Расшифровать"}
-              </TipButton>
-            </div>
+            </>
+          )}
+        >
+          <div className="happ-decrypt-dialog">
+            <div className="json">{payload.sub_url}</div>
             {happDecryptStatus ? <div className="composer-meta-hint">{happDecryptStatus}</div> : null}
           </div>
         </Modal>
       ) : null}
 
       {showTester ? (
-        <Modal onClose={() => setShowTester(false)} title="Тестер подписки" showCloseButton>
-          <div className="toolbar"><TipButton tip="Запустить тест подписки" tone="primary" className="btn" onClick={() => void runTester()}>Запустить тест</TipButton></div>
+        <Modal
+          onClose={() => setShowTester(false)}
+          title="Тестер подписки"
+          showCloseButton
+          lead="Слева — что отдал источник, справа — что получит приложение после конвертации."
+          footer={(
+            <TipButton tip="Запустить тест подписки" tone="primary" onClick={() => void runTester()}>
+              <TestIcon className="btn-icon" /> Запустить тест
+            </TipButton>
+          )}
+        >
           <div className="result-grid">
             <div className="result">
               <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
@@ -2892,107 +3459,7 @@ export default function App() {
 
       {showProfileEditor ? (
         <Modal onClose={() => setShowProfileEditor(false)} title="Редактор профилей и UA" showCloseButton>
-          <div className="editor-layout">
-            <section className="editor-pane">
-              <h3 className="editor-heading">Профили</h3>
-              <div className="row">
-                <select value={profileName} onChange={(e) => setProfileName(e.target.value)}>
-                  <option value="">Выберите профиль</option>
-                  {profileCatalog.profiles.map((x) => <option key={x} value={x}>{x}</option>)}
-                </select>
-                <TextInput placeholder="или имя нового профиля" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
-              </div>
-              {selectedProfileMeta ? (
-                <div className="composer-meta-hint">
-                  Владелец: {selectedProfileMeta.ownerUsername || "shared"} · Тип: {selectedProfileMeta.visibility}
-                </div>
-              ) : null}
-              <div className="profile-form-card">
-                <label className="composer-label">Переопределение HWID</label>
-                <div className="chip-row">
-                  <TipChipButton
-                    tip="Разрешить override hwid из запроса"
-                    className={`chip-btn ${profileForm.allowHwidOverride ? "active" : ""}`}
-                    onClick={() => setProfileForm((prev) => ({ ...prev, allowHwidOverride: true }))}
-                  >
-                    Разрешено
-                  </TipChipButton>
-                  <TipChipButton
-                    tip="Запретить override hwid из заголовков запроса"
-                    className={`chip-btn ${!profileForm.allowHwidOverride ? "active" : ""}`}
-                    onClick={() => setProfileForm((prev) => ({ ...prev, allowHwidOverride: false }))}
-                  >
-                    Запрещено
-                  </TipChipButton>
-                </div>
-
-                <label className="composer-label">Заголовки профиля</label>
-                <div className="profile-headers-list">
-                  {profileForm.headers.length === 0 ? <div className="status">Заголовки не добавлены</div> : null}
-                  {profileForm.headers.map((row) => (
-                    <div key={row.id} className="profile-header-row">
-                      <TextInput
-                        placeholder="header-name"
-                        value={row.key}
-                        onChange={(e) => setProfileForm((prev) => ({
-                          ...prev,
-                          headers: prev.headers.map((item) => (item.id === row.id ? { ...item, key: e.target.value } : item)),
-                        }))}
-                      />
-                      <TextInput
-                        placeholder="value"
-                        value={row.value}
-                        onChange={(e) => setProfileForm((prev) => ({
-                          ...prev,
-                          headers: prev.headers.map((item) => (item.id === row.id ? { ...item, value: e.target.value } : item)),
-                        }))}
-                      />
-                      <TipIconButton
-                        tip="Удалить заголовок"
-                        aria-label="Удалить заголовок"
-                        icon={<TrashIcon className="btn-icon" />}
-                        onClick={() => setProfileForm((prev) => ({ ...prev, headers: prev.headers.filter((item) => item.id !== row.id) }))}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="toolbar">
-                  <TipButton
-                    tip="Добавить заголовок"
-                    className="btn"
-                    onClick={() => setProfileForm((prev) => ({
-                      ...prev,
-                      headers: [...prev.headers, { id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, key: "", value: "" }],
-                    }))}
-                  >
-                    <PlusIcon className="btn-icon" /> Добавить заголовок
-                  </TipButton>
-                </div>
-              </div>
-              <div className="toolbar">
-                <TipButton tip="Загрузить выбранный профиль" className="btn" onClick={() => void loadProfileFile()}>Загрузить</TipButton>
-                <TipButton tip="Сохранить профиль" className="btn" onClick={() => void saveProfileFile()}>Сохранить</TipButton>
-                <TipButton tip="Удалить профиль" className="btn" onClick={() => void removeProfileFile()}>Удалить</TipButton>
-              </div>
-            </section>
-
-            <section className="editor-pane">
-              <h3 className="editor-heading">UA Каталог</h3>
-              <div className="row">
-                <select value={selectedOs} onChange={(e) => setSelectedOs(e.target.value)}>
-                  <option value="">Выберите ОС</option>
-                  {osOptions.map((osName) => <option key={osName} value={osName}>{osName}</option>)}
-                </select>
-                <select value={payload.app || ""} onChange={(e) => setPayload((p) => ({ ...p, app: e.target.value }))}>
-                  <option value="">Выберите приложение</option>
-                  {appOptions.map((appName) => <option key={appName} value={appName}>{appName}</option>)}
-                </select>
-              </div>
-              <label className="composer-label">Текущий User-Agent</label>
-              <Textarea readOnly value={uaPreview || "UA не найден"} />
-              <div className="status">UA берётся из каталога и автоматически применяется при запросах.</div>
-            </section>
-          </div>
+          {profileEditorContent}
         </Modal>
       ) : null}
 
@@ -3016,43 +3483,7 @@ export default function App() {
             />
             {shareItem.hidden ? <div className="status">Короткая ссылка скрыта: публичный адрес `/l/{shareItem.shortId || ""}` недоступен.</div> : null}
             {isAdminUser && shareItem.shortId ? (
-              <section className="sub-card share-access-card">
-                <div className="admin-section-head">
-                  <h2>Доступ</h2>
-                  <p>Админ может выдать `view` или `edit` на эту подписку конкретным пользователям.</p>
-                </div>
-                {shareAccessLoading ? <div className="status">Загрузка доступа...</div> : null}
-                {!shareAccessLoading ? (
-                  <>
-                    <div className="status">Владелец: {shareAccessOwner || "не задан"}</div>
-                    <div className="share-access-list">
-                      {shareAccessUsers.length === 0 ? <div className="status">Нет обычных пользователей для выдачи доступа.</div> : null}
-                      {shareAccessUsers.map((user) => (
-                        <label key={user.username} className="share-access-row">
-                          <span>{user.username}</span>
-                          <select
-                            value={shareAccessDraft[user.username] || ""}
-                            disabled={user.username === shareAccessOwner}
-                            onChange={(e) => setShareAccessDraft((prev) => ({
-                              ...prev,
-                              [user.username]: (e.target.value === "edit" ? "edit" : (e.target.value === "view" ? "view" : "")),
-                            }))}
-                          >
-                            <option value="">нет доступа</option>
-                            <option value="view">view</option>
-                            <option value="edit">edit</option>
-                          </select>
-                        </label>
-                      ))}
-                    </div>
-                    <div className="toolbar">
-                      <TipButton tip="Сохранить права доступа к подписке" className="btn" onClick={() => void saveShareAccess()}>
-                        Сохранить доступ
-                      </TipButton>
-                    </div>
-                  </>
-                ) : null}
-              </section>
+              <section className="card share-access-card">{accessEditor}</section>
             ) : null}
           </>
         </Modal>
@@ -3060,6 +3491,22 @@ export default function App() {
       {showOverrides && overridesItem ? (
         <OverridesModal item={overridesItem} onClose={() => setShowOverrides(false)} onNotify={notify} />
       ) : null}
+      {showAccess && shareItem ? (
+        <Modal
+          onClose={() => setShowAccess(false)}
+          title={`Доступы: ${shareItem.title}`}
+          lead="Права на эту подписку. Владелец всегда может её менять."
+          showCloseButton
+          footer={(
+            <TipButton tip="Закрыть окно" onClick={() => setShowAccess(false)}>Закрыть</TipButton>
+          )}
+        >
+          {shareItem.shortId
+            ? accessEditor
+            : <div className="status">У подписки нет короткой ссылки — выдавать доступ не к чему. Сначала сохраните её с коротким идентификатором.</div>}
+        </Modal>
+      ) : null}
+
       {showSubUsers && subUsersItem ? (
         <Modal onClose={() => setShowSubUsers(false)} title={`Пользователи: ${subUsersItem.title}`} showCloseButton>
           <div className="sub-users-layout">
@@ -3067,10 +3514,14 @@ export default function App() {
             {!subUsersLoading && subUsersData ? (
               <>
                 <section className="sub-users-policy">
+                  <div className="form-section-head">
+                    <div className="form-section-title">Правила доступа</div>
+                    <div className="form-section-lead">Лимит устройств и тексты, которые увидит заблокированный пользователь.</div>
+                  </div>
                   <div className="sub-users-summary">
-                    <span className="label">Всего: {subUsersData.summary.usersCount}</span>
-                    <span className="label">Активных: {subUsersData.summary.activeCount}</span>
-                    <span className="label">Заблокировано: {subUsersData.summary.blockedCount}</span>
+                    <Badge>Всего: {subUsersData.summary.usersCount}</Badge>
+                    <Badge tone="ok">Активных: {subUsersData.summary.activeCount}</Badge>
+                    <Badge tone="danger">Заблокировано: {subUsersData.summary.blockedCount}</Badge>
                   </div>
                   <div className="row">
                     <TextInput
@@ -3079,7 +3530,7 @@ export default function App() {
                       onChange={(e) => setSubUsersMax(e.target.value)}
                       disabled={subUsersItem.permissions?.canEdit === false}
                     />
-                    <TipButton tip="Сохранить настройки" className="btn" onClick={() => void saveSubUsersPolicy()} disabled={subUsersItem.permissions?.canEdit === false}>
+                    <TipButton tip="Сохранить настройки" onClick={() => void saveSubUsersPolicy()} disabled={subUsersItem.permissions?.canEdit === false}>
                       Сохранить настройки
                     </TipButton>
                   </div>
@@ -3100,9 +3551,14 @@ export default function App() {
                 </section>
 
                 <section className="sub-users-list">
-                  {subUsersData.users.length === 0 ? <article className="sub-card">Пользователи еще не подключались.</article> : null}
+                  {subUsersData.users.length === 0 ? (
+                    <article className="card empty-state">
+                      <div className="empty-state-title">Подключений пока нет</div>
+                      <div className="empty-state-text">Как только приложение запросит подписку по этой ссылке, устройство появится здесь.</div>
+                    </article>
+                  ) : null}
                   {subUsersData.users.map((user) => (
-                    <article key={user.hwid} className="sub-card sub-user-card">
+                    <article key={user.hwid} className="card sub-user-card">
                       <div className="sub-head">
                         <div>
                           <div className="sub-name">{user.hwid}</div>
@@ -3116,13 +3572,12 @@ export default function App() {
                         <div className="toolbar">
                           <TipButton
                             tip={user.blocked ? "Разблокировать пользователя" : "Заблокировать пользователя"}
-                            className="btn"
                             disabled={subUsersItem.permissions?.canEdit === false}
                             onClick={() => void toggleSubUserBlocked(user.hwid, !user.blocked, user.blockReason)}
                           >
                             {user.blocked ? "Разблокировать" : "Блокировать"}
                           </TipButton>
-                          <TipButton tip="Удалить пользователя и историю" className="btn" onClick={() => void removeSubUser(user.hwid)} disabled={subUsersItem.permissions?.canEdit === false}>
+                          <TipButton tip="Удалить пользователя и историю" onClick={() => void removeSubUser(user.hwid)} disabled={subUsersItem.permissions?.canEdit === false}>
                             Удалить
                           </TipButton>
                         </div>
@@ -3139,7 +3594,6 @@ export default function App() {
                       <div className="toolbar">
                         <TipButton
                           tip="Показать/скрыть историю изменений устройства"
-                          className="btn"
                           onClick={() => setSubUsersExpandedHwid((prev) => (prev === user.hwid ? "" : user.hwid))}
                         >
                           {subUsersExpandedHwid === user.hwid ? "Скрыть историю" : "История изменений"}
@@ -3172,6 +3626,6 @@ export default function App() {
         </Modal>
       ) : null}
       <NotificationToasts items={notifications} onDismiss={dismissNotification} />
-    </main>
+    </AppShell>
   );
 }

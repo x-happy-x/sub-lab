@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconButton, Tooltip } from "@x-happy-x/ui-kit";
-import { CloseIcon, ProfileIcon, UserIcon } from "../icons";
+import { CloseIcon, ProfileIcon } from "../icons";
 import type { AuthUser } from "../types";
 
 type Props = {
@@ -8,6 +7,12 @@ type Props = {
   onLogout: () => void;
   onAdmin?: () => void;
   onHome?: () => void;
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: "Администратор",
+  editor: "Редактор",
+  viewer: "Наблюдатель",
 };
 
 export function UserMenu({ user, onLogout, onAdmin, onHome }: Props) {
@@ -28,22 +33,25 @@ export function UserMenu({ user, onLogout, onAdmin, onHome }: Props) {
 
   if (!user) return null;
 
+  const role = String(user.accountRole || user.role || "");
+  const initial = String(user.username || "?").trim().charAt(0).toUpperCase();
+
   return (
     <div className="user-menu" ref={rootRef}>
-      <Tooltip content="Аккаунт">
-        <span className="ui-tip-wrap">
-          <IconButton aria-label="Аккаунт" onClick={() => setOpen((v) => !v)}>
-            <UserIcon className="btn-icon" />
-          </IconButton>
+      <button type="button" className="me-button" aria-haspopup="menu" aria-label="Аккаунт" onClick={() => setOpen((v) => !v)}>
+        <span className="me-avatar">{initial}</span>
+        <span className="me-text">
+          <b>{user.username}</b>
+          <span>{ROLE_LABELS[role] || role}</span>
         </span>
-      </Tooltip>
+      </button>
       {open ? (
         <div className="user-dropdown" role="menu">
           <div className="user-dropdown-head">
-            <UserIcon className="btn-icon" />
+            <span className="me-avatar">{initial}</span>
             <div>
               <div className="user-name">{user.username}</div>
-              <div className="user-role">{user.accountRole || user.role}</div>
+              <div className="user-role">{ROLE_LABELS[role] || role}</div>
             </div>
           </div>
           <div className="user-dropdown-actions">

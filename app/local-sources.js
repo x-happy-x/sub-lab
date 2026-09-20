@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DATA_DIR } from "./config.js";
 import crypto from "node:crypto";
+import { normalizeMergeFilter } from "./merge-source.js";
 
 const LOCAL_SOURCES_DIR = path.join(DATA_DIR, "local-sources");
 
@@ -66,37 +67,83 @@ function createLocalSource(input) {
   };
 }
 
-function createMergedSource(input) {
-  const items = Array.isArray(input?.items)
-    ? input.items.filter((item) => item && typeof item === "object")
-    : [];
-  if (items.length === 0) return { ok: false, status: 400, error: "merge items are required" };
+const MERGE_ITEM_KEYS = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups", "nodes"];
 
-  ensureLocalSourcesDir();
-  const id = crypto.randomBytes(6).toString("base64url");
+/**
+ * Элемент объединения: параметры источника плюс отбор серверов.
+ *
+ * Выходной формат и заголовки у каждого источника свои — их и сохраняем как
+ * есть. Сверху лежит `filter`: регулярка по имени сервера и поведение, если
+ * под неё ничего не подошло.
+ */
+function normalizeMergeItem(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const item = {};
+  for (const key of MERGE_ITEM_KEYS) {
+    const value = raw[key];
+    if (value === undefined || value === null || value === "") continue;
+    item[key] = String(value);
+  }
+  if (!item.sub_url) return null;
+  item.title = sanitizeLocalSourceName(raw.title);
+  item.shortId = String(raw.shortId || "").trim().slice(0, 64);
+  item.filter = normalizeMergeFilter(raw.filter);
+  return item;
+}
+
+function normalizeMergeItems(raw) {
+  return (Array.isArray(raw) ? raw : []).map(normalizeMergeItem).filter(Boolean);
+}
+
+function writeMergedSource(id, { name, items, createdAt, updatedAt }) {
   const metaPath = resolveLocalSourceMetaPath(id);
-  const name = sanitizeLocalSourceName(input?.name) || `merge-${id}`;
-  const now = new Date().toISOString();
-
   fs.writeFileSync(metaPath, JSON.stringify({
     id,
     kind: "merge",
     name,
-    createdAt: now,
-    updatedAt: now,
+    createdAt,
+    updatedAt,
     items,
   }, null, 2));
+  return { id, kind: "merge", name, items, createdAt, updatedAt };
+}
+
+function createMergedSource(input) {
+  const items = normalizeMergeItems(input?.items);
+  if (items.length === 0) return { ok: false, status: 400, error: "merge items are required" };
+
+  ensureLocalSourcesDir();
+  const id = crypto.randomBytes(6).toString("base64url");
+  const name = sanitizeLocalSourceName(input?.name) || `merge-${id}`;
+  const now = new Date().toISOString();
+
+  return { ok: true, source: writeMergedSource(id, { name, items, createdAt: now, updatedAt: now }) };
+}
+
+/**
+ * Пересобрать состав объединения, не меняя его идентификатор.
+ *
+ * Короткая ссылка смотрит на `merge:<id>`, поэтому состав правится на месте:
+ * иначе каждая правка выдавала бы пользователям новый адрес подписки.
+ */
+function updateMergedSource(id, input) {
+  const existing = getMergedSource(id);
+  if (!existing.ok) return existing;
+  const items = normalizeMergeItems(input?.items);
+  if (items.length === 0) return { ok: false, status: 400, error: "merge items are required" };
+
+  ensureLocalSourcesDir();
+  const name = sanitizeLocalSourceName(input?.name) || existing.source.name;
+  const now = new Date().toISOString();
 
   return {
     ok: true,
-    source: {
-      id,
-      kind: "merge",
+    source: writeMergedSource(existing.source.id, {
       name,
       items,
-      createdAt: now,
+      createdAt: existing.source.createdAt || now,
       updatedAt: now,
-    },
+    }),
   };
 }
 
@@ -144,7 +191,7 @@ function getMergedSource(id) {
         id: String(meta.id || id),
         kind: "merge",
         name: String(meta.name || id),
-        items: Array.isArray(meta.items) ? meta.items : [],
+        items: normalizeMergeItems(meta.items),
         createdAt: String(meta.createdAt || ""),
         updatedAt: String(meta.updatedAt || ""),
       },
@@ -157,6 +204,8 @@ function getMergedSource(id) {
 export {
   createLocalSource,
   createMergedSource,
+  updateMergedSource,
+  normalizeMergeItems,
   getLocalSource,
   getMergedSource,
   resolveLocalSourceFilePath,

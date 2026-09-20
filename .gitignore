@@ -11,6 +11,7 @@ frontend/tsconfig.tsbuildinfo
 .idea/
 homeserver
 deploy-direct.local.sh
+deploy/targets.local.json
 .codex
 .tmp-test-data/
 .local-data/
