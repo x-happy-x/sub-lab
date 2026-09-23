@@ -18,6 +18,3 @@ deploy/targets.local.json
 sub-lab.zip
 sub.json
 bypass-all.txt
-
-# Happ crypt5 private keys (runtime resource, never commit)
-resources/happ/crypt5-keys.json
