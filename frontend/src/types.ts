@@ -1,5 +1,6 @@
 export type Endpoint = "sub" | "last";
-export type Output = "raw" | "raw_base64" | "json" | "yml";
+/** `clash_provider` — файл для `proxy-providers` mihomo: только список прокси. */
+export type Output = "raw" | "raw_base64" | "json" | "yml" | "clash_provider";
 /** Насколько разворачивать записи подписки в форматах без вложенности. */
 export type NodesMode = "collapse" | "group" | "expand";
 
@@ -48,6 +49,8 @@ export type SyncPeer = {
   enabled: boolean;
   intervalMinutes: number;
   includeProfiles: boolean;
+  /** Досылать на удалённую установку то, чего там нет. */
+  pushEnabled: boolean;
   lastStatus: string;
   lastError: string;
   lastReport: Record<string, unknown>;
@@ -64,12 +67,50 @@ export type SyncPeerInput = {
   enabled?: boolean;
   intervalMinutes?: number;
   includeProfiles?: boolean;
+  pushEnabled?: boolean;
 };
 
 export type SyncPeerTestResult = {
   remoteUrl: string;
   exportedAt: string;
   available: Record<string, number>;
+};
+
+/**
+ * Итог суточной проверки подписки.
+ *
+ * Собирается на сервере раз в день: карточка показывает, жива ли подписка,
+ * сколько осталось и куда идти продлевать.
+ */
+export type ShortLinkHealth = {
+  shortLinkId: string;
+  checkedAt: string;
+  ok: boolean;
+  /** До провайдера не достучались — это «не знаем», а не «подписка мертва». */
+  unreachable: boolean;
+  status: number;
+  error: string;
+  servers: number;
+  upload: number;
+  download: number;
+  /** 0 — провайдер не сообщает лимит, значит безлимит. */
+  total: number;
+  /** Миллисекунды; 0 — срок не сообщается. */
+  expireAt: number;
+  supportUrl: string;
+  webPageUrl: string;
+  providerTitle: string;
+};
+
+/** Сколько устройств на подписке — для мелких цифр в шапке карточки. */
+export type ShortLinkUserCounts = {
+  shortLinkId: string;
+  total: number;
+  active: number;
+  blocked: number;
+  /** Лимит опустили задним числом — столько устройств оказалось лишними. */
+  overLimit: number;
+  maxUsers: number;
 };
 
 export type ShortLinkPermissions = {
@@ -300,6 +341,8 @@ export type UsageStatsDevice = {
   blocked: boolean;
   firstSeenAt: string;
   lastSeenAt: string;
+  /** На скольких подписках видели это устройство. */
+  links: number;
 };
 
 export type UsageStats = {

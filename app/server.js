@@ -29,6 +29,7 @@ import {
 import {
   incrementShortLinkHits,
   getShortLinkPermissions,
+  deleteShortLinkRow,
   listShortLinksByTagForActor,
   getShortLinkRow,
   listShortLinksGrantedTo,
@@ -50,6 +51,8 @@ import {
   exportSyncBundle,
   importSyncBundle,
   listAllShortLinkRows,
+  listShortLinkHealthFor,
+  listShortLinkUserCounts,
   listSyncPeers,
   getSyncPeer,
   getSyncPeerWithToken,
@@ -58,6 +61,8 @@ import {
   deleteSyncPeer,
   recordSyncPeerRun,
 } from "./sqlite-store.js";
+import { encryptHappCrypt5 } from "./happ-crypt5.js";
+import { checkShortLinkHealth, describeTransportError, startHealthScheduler } from "./subscription-health.js";
 import {
   createMockSource,
   getMockSource,
@@ -1294,6 +1299,50 @@ async function handleUpdateShortLink(req, res, id) {
   }
 }
 
+/**
+ * Итоги проверок по всем доступным подпискам.
+ *
+ * Отдельной ручкой, а не внутри /api/favorites: список карточек не должен
+ * ждать, пока соберутся проверки, — они подгружаются следом.
+ */
+async function handleListShortLinkHealth(req, res) {
+  if (!(await requireApiAuth(req, res))) return;
+  try {
+    const actor = authActorFromState(await getAuthState(req));
+    const ids = [];
+    for (const link of await listAllShortLinkRows()) {
+      const permission = await getShortLinkPermissions(link.id, actor);
+      if (permission?.canView) ids.push(link.id);
+    }
+    // Счётчики устройств едут тем же запросом: карточке они нужны ровно там
+    // же и тогда же, что и проверка, а второй поход по сети ради двух чисел —
+    // лишний.
+    sendJson(res, 200, {
+      ok: true,
+      health: await listShortLinkHealthFor(ids),
+      users: await listShortLinkUserCounts(ids),
+    });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e?.message || "health fetch failed" });
+  }
+}
+
+/** Проверить одну подписку прямо сейчас, не дожидаясь суточного обхода. */
+async function handleCheckShortLinkHealth(req, res, id) {
+  const permission = await requireShortLinkPermission(req, res, id, "view");
+  if (!permission) return;
+  try {
+    const health = await checkShortLinkHealth(id);
+    if (!health) {
+      sendJson(res, 400, { ok: false, error: "объединение проверяется по каждому источнику отдельно" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, health });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "health check failed" });
+  }
+}
+
 async function handleGetShortLink(req, res, id) {
   const state = await getAuthState(req);
   const found = await getShortLink(id, authActorFromState(state));
@@ -1324,6 +1373,36 @@ function buildFeedKeyFromShortLinkParams(params) {
     profiles: config.profileNames,
     hwid: String(config.forwardHeaders?.["x-hwid"] || "").trim(),
   });
+}
+
+/**
+ * Удалить короткую ссылку насовсем.
+ *
+ * Отличается от «убрать из своего списка»: адрес перестаёт отвечать у всех,
+ * кому его выдали, и вместе с ним уходят доступы, устройства и счётчики.
+ * Поэтому право на это есть только у владельца и у админа, а подтверждение
+ * спрашивает интерфейс.
+ */
+async function handleDeleteShortLink(req, res, id) {
+  if (!(await requireApiAuth(req, res))) return;
+  try {
+    const actor = authActorFromState(await getAuthState(req));
+    const permission = await getShortLinkPermissions(id, actor);
+    if (!permission?.link) {
+      sendJson(res, 404, { ok: false, error: "short link not found" });
+      return;
+    }
+    const login = String(actor?.username || "").trim().toLowerCase();
+    const isOwner = Boolean(login) && login === permission.link.ownerUsername;
+    if (!permission.canManageAccess && !isOwner) {
+      sendJson(res, 403, { ok: false, error: "удалять короткую ссылку может владелец или админ" });
+      return;
+    }
+    const removed = await deleteShortLinkRow(id, { deletedBy: actor?.username });
+    sendJson(res, 200, { ok: true, id, removed });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "short link delete failed" });
+  }
 }
 
 async function handleGetShortLinkOverrides(req, res, id) {
@@ -1564,6 +1643,31 @@ async function handleParseBulkImport(req, res) {
   }
 }
 
+/**
+ * Собрать `happ://crypt5/...` из обычной ссылки.
+ *
+ * Обратная операция к /api/happ-decrypt: короткую ссылку панели удобно отдавать
+ * в том же виде, в каком её раздают провайдеры — приложение открывает её само.
+ */
+async function handleHappEncrypt(req, res) {
+  if (!(await requireEditorAuth(req, res))) return;
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    const url = String(body?.url || body?.subUrl || body?.sub_url || "").trim();
+    if (!url) {
+      sendJson(res, 400, { ok: false, error: "url is required" });
+      return;
+    }
+    const link = encryptHappCrypt5(url, {
+      marker: String(body?.marker || "").trim() || undefined,
+      salted: body?.salted !== false,
+    });
+    sendJson(res, 200, { ok: true, url, link });
+  } catch (e) {
+    sendJson(res, 400, { ok: false, error: e?.message || "happ encrypt failed" });
+  }
+}
+
 async function handleHappDecrypt(req, res) {
   try {
     const body = await readJsonBody(req, 256 * 1024);
@@ -1775,6 +1879,11 @@ function wantsHtmlSharePage(req) {
 function resolveShortLinkTypeOverride(reqUrl) {
   const type = String(reqUrl?.searchParams?.get("type") || "").trim().toLowerCase();
   if (type === "raw") return "raw";
+  if (type === "raw_base64" || type === "base64") return "raw_base64";
+  // json тут не понимался вовсе: ссылка `?type=json` молча проваливалась в
+  // авто-подбор, хотя формат в ней назван прямо.
+  if (type === "json") return "json";
+  if (type === "provider" || type === "clash-provider" || type === "clash_provider") return "clash_provider";
   if (type === "yml" || type === "yaml" || type === "clash") return "yml";
   return "";
 }
@@ -1854,10 +1963,11 @@ async function handleShortLinkResolve(req, res, id) {
 
   const endpoint = found.link.params.endpoint === "sub" ? "/sub" : "/last";
   const params = { ...(found.link.params || {}) };
-  try {
-    if (typeOverride) params.output = typeOverride;
-  } catch {
-    // ignore malformed query and keep original params
+  if (typeOverride) {
+    // Формат назван в ссылке прямо — он сильнее подбора по клиенту. Иначе
+    // `?type=json` молча превращался в то, что авто выберет по User-Agent.
+    params.output = typeOverride;
+    params.output_auto = "";
   }
   const qs = buildQueryFromParams(params).toString();
   const originalUrl = req.url;
@@ -2407,6 +2517,9 @@ async function foreignFavorites(req, actor, known) {
   const out = [];
   for (const link of links) {
     if (!link?.id || seen.has(link.id)) continue;
+    // Свои ссылки сюда не попадают. Иначе убранная из списка подписка тут же
+    // возвращалась бы обратно — уже как выданная, хотя владелец её и убирал.
+    if (link.ownerUsername && link.ownerUsername === username) continue;
     const urls = shortLinkPublicUrls(req, link.id, link.params || {});
     out.push({
       title: link.title || link.id,
@@ -2420,7 +2533,7 @@ async function foreignFavorites(req, actor, known) {
       // derived: в свой список такие записи не сохраняются, иначе чужая
       // подписка осела бы у админа при первом же сохранении.
       derived: true,
-      foreign: link.ownerUsername !== username,
+      foreign: true,
       ownerUsername: link.ownerUsername || "",
       permissions: {
         canView: true,
@@ -2572,21 +2685,53 @@ async function handleSyncImport(req, res) {
  * Токен уезжает заголовком, а не в адресе: ссылки попадают в логи прокси,
  * а секрету там не место.
  */
-async function fetchRemoteBundle({ remoteUrl, remoteToken, profiles = true, timeoutMs = 120000 }) {
+/**
+ * Сетевой запрос с повторами.
+ *
+ * Канал до удалённой панели бывает рваным: соединение сбрасывается на середине
+ * или не успевает подняться. Один обрыв не повод считать синхронизацию
+ * несостоявшейся, поэтому транспортные ошибки повторяем с паузой. Ответы с
+ * кодом (401, 502 и прочие) повторять бессмысленно — там уже всё решено.
+ */
+async function fetchWithRetries(url, init, { attempts = 3, pauseMs = 2000, timeoutMs = 45000 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      // Таймаут свой на каждую попытку: один сигнал на все три после первого
+      // же срабатывания обрывал бы и остальные, не дав им и шанса.
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e) {
+      lastError = e;
+      // Выход за таймаут повторять незачем: следующая попытка упрётся в то же
+      // самое, только время потратим. Повторяем именно обрывы соединения.
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") break;
+      if (attempt >= attempts) break;
+      // Без unref: этот таймер держит цикл событий намеренно. С unref процесс,
+      // которому больше нечего делать, выходит прямо посреди паузы — запрос
+      // так и не повторяется, и наружу не попадает ни результата, ни ошибки.
+      await new Promise((resolve) => { setTimeout(resolve, pauseMs * attempt); });
+    }
+  }
+  const error = new Error(describeTransportError(lastError, "удалённой панели"));
+  error.status = 502;
+  error.cause = lastError;
+  throw error;
+}
+
+async function fetchRemoteBundle({ remoteUrl, remoteToken, profiles = true, timeoutMs = 45000 }) {
   const remote = normalizeRemoteSyncUrl(remoteUrl);
   const token = String(remoteToken || "").trim();
   if (!token) throw new Error("remoteToken is required");
   const exportUrl = new URL(remote.toString());
   exportUrl.pathname = `${exportUrl.pathname}/api/sync/export`.replace(/\/{2,}/g, "/");
   if (!profiles) exportUrl.searchParams.set("profiles", "0");
-  const resp = await fetch(exportUrl, {
+  const resp = await fetchWithRetries(exportUrl, {
     method: "GET",
     headers: {
       "Accept": "application/json",
       "Authorization": `Bearer ${token}`,
     },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  }, { timeoutMs });
   const json = await resp.json().catch(() => null);
   if (!resp.ok || !json?.ok || !json?.bundle) {
     const error = new Error(json?.error || `remote sync export failed (${resp.status})`);
@@ -2604,6 +2749,38 @@ function summarizeSyncBundle(bundle) {
     if (Array.isArray(data[key])) out[key] = data[key].length;
   }
   return out;
+}
+
+/**
+ * Досылка своей выгрузки на удалённую установку.
+ *
+ * Обмен остаётся односторонним по инициативе: ходим только мы. Но забрать
+ * чужое мало — без обратной отправки на той стороне не появится ничего
+ * нового, и панели разъезжаются.
+ */
+async function pushBundleToRemote({ remoteUrl, remoteToken, profiles = true, dryRun = false, timeoutMs = 60000 }) {
+  const remote = normalizeRemoteSyncUrl(remoteUrl);
+  const token = String(remoteToken || "").trim();
+  if (!token) throw new Error("remoteToken is required");
+  const bundle = await exportSyncBundle({ profiles });
+  const importUrl = new URL(remote.toString());
+  importUrl.pathname = `${importUrl.pathname}/api/sync/import`.replace(/\/{2,}/g, "/");
+  const resp = await fetchWithRetries(importUrl, {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify({ bundle, dryRun: Boolean(dryRun) }),
+  }, { timeoutMs });
+  const json = await resp.json().catch(() => null);
+  if (!resp.ok || !json?.ok) {
+    const error = new Error(json?.error || `remote sync import failed (${resp.status})`);
+    error.status = resp.status && resp.status >= 400 ? resp.status : 502;
+    throw error;
+  }
+  return json.imported && typeof json.imported === "object" ? json.imported : {};
 }
 
 const syncPeerRunning = new Set();
@@ -2625,14 +2802,32 @@ async function runSyncPeer(peer, { dryRun = false } = {}) {
       profiles: peer.includeProfiles,
     });
     const imported = await importSyncBundle(bundle, { dryRun });
-    const report = { ...imported, available: summarizeSyncBundle(bundle), exportedAt: bundle?.exportedAt || "" };
+    // Отдаём своё только после удачного приёма чужого: иначе на ту сторону
+    // уехала бы половина картины, а спорные записи разошлись бы по времени.
+    // На проверке тоже ходим в обе стороны, только удалённая сторона ничего у
+    // себя не пишет: иначе кнопка «Проверить» молчала бы о том, что досылка
+    // упирается в чужой токен или лимит тела.
+    const pushed = peer.pushEnabled
+      ? await pushBundleToRemote({
+        remoteUrl: peer.remoteUrl,
+        remoteToken: peer.remoteToken,
+        profiles: peer.includeProfiles,
+        dryRun,
+      })
+      : null;
+    const report = {
+      ...imported,
+      pushed: pushed || undefined,
+      available: summarizeSyncBundle(bundle),
+      exportedAt: bundle?.exportedAt || "",
+    };
     const saved = await recordSyncPeerRun(peer.id, {
       status: dryRun ? "dry-run" : "ok",
       error: "",
       report,
       synced: !dryRun,
     });
-    return { ok: true, peer: saved, remoteUrl: remote.origin, imported, report, dryRun };
+    return { ok: true, peer: saved, remoteUrl: remote.origin, imported, pushed, report, dryRun };
   } catch (e) {
     const message = e?.message || "sync failed";
     const saved = await recordSyncPeerRun(peer.id, { status: "error", error: message });
@@ -2711,7 +2906,7 @@ async function handleTestSyncPeer(req, res) {
       if (!remoteUrl) remoteUrl = stored.remoteUrl;
       if (!remoteToken) remoteToken = stored.remoteToken;
     }
-    const { remote, bundle } = await fetchRemoteBundle({ remoteUrl, remoteToken, profiles: false, timeoutMs: 30000 });
+    const { remote, bundle } = await fetchRemoteBundle({ remoteUrl, remoteToken, profiles: false, timeoutMs: 20000 });
     sendJson(res, 200, {
       ok: true,
       remoteUrl: remote.origin,
@@ -2833,6 +3028,7 @@ const server = http.createServer(async (req, res) => {
   const shortOverridesApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/overrides$/);
   const shortOverridesPreviewApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/overrides\/preview$/);
   const shortUsersApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users$/);
+  const shortHealthApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/health$/);
   const shortUserApiMatch = routePath.match(/^\/api\/short-links\/([A-Za-z0-9_-]+)\/users\/([^/]+)$/);
   const localSourceApiMatch = routePath.match(/^\/api\/local-sources\/([A-Za-z0-9_-]+)$/);
   const mergedSourceApiMatch = routePath.match(/^\/api\/merged-sources\/([A-Za-z0-9_-]+)$/);
@@ -3119,6 +3315,10 @@ const server = http.createServer(async (req, res) => {
     void handleParseBulkImport(req, res);
     return;
   }
+  if (req.method === "POST" && routePath === "/api/happ-encrypt") {
+    await handleHappEncrypt(req, res);
+    return;
+  }
   if (req.method === "POST" && routePath === "/api/happ-decrypt") {
     if (!(await requireApiAuth(req, res))) return;
     void handleHappDecrypt(req, res);
@@ -3132,6 +3332,14 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && routePath === "/api/short-links") {
     if (!(await requireEditorAuth(req, res))) return;
     void handleCreateShortLink(req, res);
+    return;
+  }
+  if (req.method === "GET" && routePath === "/api/short-links/health") {
+    await handleListShortLinkHealth(req, res);
+    return;
+  }
+  if (req.method === "POST" && shortHealthApiMatch) {
+    await handleCheckShortLinkHealth(req, res, shortHealthApiMatch[1]);
     return;
   }
   if (req.method === "GET" && shortApiMatch) {
@@ -3183,6 +3391,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "DELETE" && shortUserApiMatch) {
     if (!(await requireEditorAuth(req, res))) return;
     void handleDeleteShortLinkUser(req, res, shortUserApiMatch[1], shortUserApiMatch[2]);
+    return;
+  }
+  if (req.method === "DELETE" && shortApiMatch) {
+    await handleDeleteShortLink(req, res, shortApiMatch[1]);
     return;
   }
   if (req.method === "PUT" && shortApiMatch) {
@@ -3271,6 +3483,7 @@ function startServer() {
     console.log(`[OK] listening on :${PORT}`);
   });
   startSyncPeerScheduler();
+  startHealthScheduler();
   return server;
 }
 
@@ -3298,6 +3511,7 @@ export {
   produceOutput,
   fetchWithNode,
   fetchRemoteBundle,
+  pushBundleToRemote,
   summarizeSyncBundle,
   foreignFavorites,
   startServer,

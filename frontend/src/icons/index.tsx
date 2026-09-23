@@ -21,6 +21,7 @@ import shieldRaw from "./svg/shield.svg?raw";
 import menuRaw from "./svg/menu.svg?raw";
 import chartRaw from "./svg/chart.svg?raw";
 import pingRaw from "./svg/ping.svg?raw";
+import lockRaw from "./svg/lock.svg?raw";
 import osWindowsRaw from "./svg/os-windows.svg?raw";
 import osMacosRaw from "./svg/os-macos.svg?raw";
 import osLinuxRaw from "./svg/os-linux.svg?raw";
@@ -67,6 +68,7 @@ export function ListIcon(props: IconProps) { return <RawIcon raw={listRaw} {...p
 export function ShieldIcon(props: IconProps) { return <RawIcon raw={shieldRaw} {...props} />; }
 export function ChartIcon(props: IconProps) { return <RawIcon raw={chartRaw} {...props} />; }
 export function PingIcon(props: IconProps) { return <RawIcon raw={pingRaw} {...props} />; }
+export function LockIcon(props: IconProps) { return <RawIcon raw={lockRaw} {...props} />; }
 export function MenuIcon(props: IconProps) { return <RawIcon raw={menuRaw} {...props} />; }
 export function OsWindowsIcon(props: IconProps) { return <RawIcon raw={osWindowsRaw} {...props} />; }
 export function OsMacosIcon(props: IconProps) { return <RawIcon raw={osMacosRaw} {...props} />; }

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 
-import { fetchRemoteBundle, summarizeSyncBundle } from "./server.js";
+import { fetchRemoteBundle, pushBundleToRemote, summarizeSyncBundle } from "./server.js";
 
 /** Поддельная удалённая установка: отдаёт выгрузку только по верному токену. */
 function startRemote(handler) {
@@ -116,4 +116,105 @@ test("адрес с путём и хвостовым слэшем собирае
 test("сводка считает только то, что реально приехало", () => {
   assert.deepEqual(summarizeSyncBundle(BUNDLE), { shortLinks: 2, access: 0, favorites: 1 });
   assert.deepEqual(summarizeSyncBundle(null), {});
+});
+
+test("своя выгрузка уезжает на ту сторону", async () => {
+  const seen = { url: "", auth: "", method: "", body: null };
+  const { server, origin } = await startRemote((req, res) => {
+    seen.url = String(req.url || "");
+    seen.auth = String(req.headers.authorization || "");
+    seen.method = String(req.method || "");
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      try {
+        seen.body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        seen.body = null;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, imported: { shortLinks: 2, hitCounters: 3 } }));
+    });
+  });
+
+  try {
+    const imported = await pushBundleToRemote({ remoteUrl: origin, remoteToken: "tok", profiles: false });
+    assert.deepEqual(imported, { shortLinks: 2, hitCounters: 3 });
+    assert.equal(seen.method, "POST");
+    assert.equal(seen.url, "/api/sync/import");
+    assert.equal(seen.auth, "Bearer tok");
+    // Отправляем именно выгрузку, а не голый список: принимающая сторона
+    // разбирает её тем же кодом, что и при ручном импорте.
+    assert.ok(seen.body?.bundle?.data);
+    assert.ok(seen.body.bundle.installationId);
+    assert.equal(seen.body.dryRun, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("отказ на той стороне доезжает текстом", async () => {
+  const { server, origin } = await startRemote((req, res) => {
+    req.resume();
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "invalid sync token" }));
+  });
+
+  try {
+    await assert.rejects(
+      () => pushBundleToRemote({ remoteUrl: origin, remoteToken: "wrong", profiles: false }),
+      (e) => {
+        assert.match(e.message, /invalid sync token/);
+        assert.equal(e.status, 401);
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("обрыв соединения переживается повтором", async () => {
+  let attempts = 0;
+  const { server, origin } = await startRemote((req, res) => {
+    attempts += 1;
+    // Первая попытка рвётся на середине — ровно то, что происходит на живом
+    // рваном канале до удалённой панели.
+    if (attempts === 1) {
+      req.socket.destroy();
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, bundle: BUNDLE }));
+  });
+
+  try {
+    const result = await fetchRemoteBundle({ remoteUrl: origin, remoteToken: "tok", profiles: false });
+    assert.equal(result.bundle.exportedAt, BUNDLE.exportedAt);
+    assert.equal(attempts >= 2, true, "должна была случиться вторая попытка");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("когда повторы кончились, причина названа по-человечески", async () => {
+  const { server, origin } = await startRemote((req) => {
+    req.socket.destroy();
+  });
+
+  try {
+    await assert.rejects(
+      () => fetchRemoteBundle({ remoteUrl: origin, remoteToken: "tok", profiles: false }),
+      (e) => {
+        // «fetch failed» ничего не объясняет — именно это и видел пользователь.
+        assert.notEqual(e.message, "fetch failed");
+        // Речь про удалённую панель, а не про провайдера подписки.
+        assert.match(e.message, /удалённой панели/);
+        assert.match(e.message, /оборвано|отклонено|таймаут/);
+        return true;
+      },
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

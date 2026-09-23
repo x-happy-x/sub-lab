@@ -422,19 +422,53 @@ test("produceOutput adds configured regex clash groups", async () => {
   assert.match(clashResult.body, /name:\s*"AUTO · RU manual"/);
 });
 
-test("JSON bundle survives a round trip back to JSON unchanged", async () => {
-  const fixturePath = new URL("./test-fixtures/raw.json", import.meta.url);
-  const jsonInput = fs.readFileSync(fixturePath, "utf8");
+test("JSON bundle stays untouched when there is nothing to collapse", async () => {
+  // Одна запись — один узел: режим ничего не меняет, и отдавать надо конфиг
+  // провайдера как есть, вместе с его dns и маршрутами.
+  const single = JSON.stringify({
+    remarks: "Одиночная",
+    outbounds: [{
+      tag: "proxy",
+      protocol: "vless",
+      settings: { vnext: [{ address: "ru1.example.com", port: 443, users: [{ id: "11111111-1111-4111-8111-111111111111", encryption: "none" }] }] },
+      streamSettings: { network: "tcp", security: "none" },
+    }],
+  });
 
   for (const nodesMode of ["collapse", "group", "expand"]) {
-    const jsonResult = await produceOutput(jsonInput, "json", { nodesMode });
+    const jsonResult = await produceOutput(single, "json", { nodesMode });
     assert.equal(jsonResult.ok, true);
-    assert.deepEqual(
-      JSON.parse(String(jsonResult.body)),
-      JSON.parse(jsonInput),
-      `json->json must be lossless regardless of nodes mode (${nodesMode})`,
-    );
+    assert.equal(jsonResult.conversion, "none-json", `сворачивать нечего, режим ${nodesMode}`);
+    assert.deepEqual(JSON.parse(String(jsonResult.body)), JSON.parse(single));
   }
+});
+
+test("JSON bundle with candidates obeys the nodes mode", async () => {
+  // В фикстуре одна запись с 31 узлом внутри. Раньше json->json был сквозным
+  // и выбор «свернуть» не делал ничего — подписка приезжала развёрнутой.
+  const jsonInput = fs.readFileSync(new URL("./test-fixtures/raw.json", import.meta.url), "utf8");
+
+  const collapsed = await produceOutput(jsonInput, "json", { nodesMode: "collapse" });
+  const expanded = await produceOutput(jsonInput, "json", { nodesMode: "expand" });
+  const grouped = await produceOutput(jsonInput, "json", { nodesMode: "group" });
+  assert.equal(collapsed.ok, true);
+  assert.equal(expanded.ok, true);
+  assert.equal(grouped.ok, true);
+
+  // Сквозной проход отдаёт структуру источника как есть — в фикстуре это один
+  // объект, а не массив. Приводим к списку, чтобы сравнивать одинаково.
+  const count = (result) => {
+    const parsed = JSON.parse(String(result.body));
+    return Array.isArray(parsed) ? parsed.length : 1;
+  };
+  // Запись провайдера и так одна запись: клиент показывает её одной строкой,
+  // а кандидаты живут внутри. Пересобирать её ради «свернуть» — значит
+  // выбросить всё, кроме основного узла, поэтому отдаём как есть.
+  assert.equal(collapsed.conversion, "none-json");
+  assert.equal(grouped.conversion, "none-json");
+  assert.equal(count(grouped), count(collapsed));
+  // А «развернуть» просит разложить запись на узлы — тут пересобираем.
+  assert.ok(count(expanded) > count(collapsed), "«развернуть» обязано отдать все узлы");
 });
 
 test("home page contains form, qr and app buttons", () => {

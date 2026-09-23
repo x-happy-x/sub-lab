@@ -1,8 +1,6 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   SUB_URL_DEFAULT,
@@ -14,6 +12,7 @@ import {
   OUTPUT_RAW_BASE64,
   OUTPUT_JSON,
   OUTPUT_CLASH,
+  OUTPUT_CLASH_PROVIDER,
   OUTPUT_DEFAULT,
   OUT_RAW,
   OUT_YAML,
@@ -30,6 +29,9 @@ import { buildMergedResponseHeaders, dedupeServerNames, filterRawBody, nameFromR
 import { parseBulkProxyText } from "./proxy-import.js";
 import {
   NODES_MODES,
+  NODES_COLLAPSE,
+  NODES_GROUP,
+  NODES_EXPAND,
   PARSER_VERSION,
   NODES_MODE_DEFAULT,
   normalizeNodesMode,
@@ -72,41 +74,21 @@ import {
   pruneStoredSnapshots,
 } from "./source-snapshots.js";
 import { getAppsCatalog } from "./apps-catalog.js";
+import { decryptHappCrypt5, isEncryptedHappLink } from "./happ-crypt5.js";
 
 const UA_CATALOG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../resources/ua-catalog.json");
-const execFile = promisify(execFileCb);
-const HAPP_DECRYPT_BIN = path.resolve(
-  process.env.HAPP_DECRYPT_BIN || path.join(path.dirname(fileURLToPath(import.meta.url)), "bin/happ-decrypt-linux-x64_x86"),
-);
 const LOCAL_SOURCE_ROOTS = [
   process.cwd(),
   DATA_DIR,
   "/resources",
 ].map((root) => path.resolve(root));
 
-function isEncryptedHappLink(value) {
-  return /^happ:\/\/crypt\d*\//i.test(String(value || "").trim());
-}
-
-function stripIndentedBlock(value) {
-  return String(value || "")
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s+/, ""))
-    .join("\n")
-    .trim();
-}
-
-function extractHappDecryptResult(stdout) {
-  const text = String(stdout || "").replace(/\r/g, "").trim();
-  if (!text) throw new Error("empty decrypt output");
-  const resultMatch = text.match(/(?:^|\n)Result\s*\n([\s\S]+)$/m);
-  if (resultMatch?.[1]) return stripIndentedBlock(resultMatch[1]);
-  const errorMatch = text.match(/(?:^|\n)Error\s*\n([\s\S]+)$/m);
-  if (errorMatch?.[1]) throw new Error(stripIndentedBlock(errorMatch[1]));
-  if (/^https?:\/\//i.test(text)) return text;
-  throw new Error("unable to parse decrypt output");
-}
-
+/**
+ * Расшифровать `happ://crypt5/...`.
+ *
+ * Обычная ссылка проходит насквозь: вызывающей стороне удобнее не разбираться,
+ * зашифровано там что-то или нет.
+ */
 async function decryptHappLink(subUrl) {
   const raw = String(subUrl || "").trim();
   if (!isEncryptedHappLink(raw)) {
@@ -118,35 +100,14 @@ async function decryptHappLink(subUrl) {
       output: raw,
     };
   }
-  if (!fs.existsSync(HAPP_DECRYPT_BIN)) {
-    throw new Error(`happ decrypt binary not found: ${HAPP_DECRYPT_BIN}`);
-  }
-  try {
-    const { stdout, stderr } = await execFile(HAPP_DECRYPT_BIN, [raw], {
-      timeout: 15_000,
-      maxBuffer: 1024 * 1024,
-    });
-    const resolvedUrl = extractHappDecryptResult(stdout || stderr || "");
-    return {
-      ok: true,
-      changed: resolvedUrl !== raw,
-      originalUrl: raw,
-      resolvedUrl,
-      output: String(stdout || "").trim(),
-    };
-  } catch (error) {
-    const stdout = String(error?.stdout || "");
-    const stderr = String(error?.stderr || "");
-    const detail = stdout || stderr;
-    if (detail) {
-      try {
-        extractHappDecryptResult(detail);
-      } catch (parseError) {
-        throw new Error(parseError?.message || "happ decrypt failed");
-      }
-    }
-    throw new Error(error?.message || "happ decrypt failed");
-  }
+  const resolvedUrl = decryptHappCrypt5(raw);
+  return {
+    ok: true,
+    changed: resolvedUrl !== raw,
+    originalUrl: raw,
+    resolvedUrl,
+    output: resolvedUrl,
+  };
 }
 
 function isHtml(s) {
@@ -655,6 +616,38 @@ function buildXrayOutboundFromImportedItem(item, index) {
   return null;
 }
 
+/**
+ * Надо ли пересобирать JSON-подписку ради режима узлов.
+ *
+ * Пересобираем только когда это на что-то влияет: внутри есть запись с
+ * несколькими узлами и выбранный режим отличается от «как есть». В остальных
+ * случаях выгоднее отдать конфиг провайдера нетронутым — в нём его dns,
+ * inbounds и маршруты, а у нас на их месте был бы шаблон.
+ */
+function jsonBundleNeedsNodesMode(rawText, options) {
+  const mode = normalizeNodesMode(options?.nodesMode);
+  try {
+    const model = parseSource(rawText);
+    if (model.meta.sourceFormat !== "json" || model.entries.length === 0) return false;
+    const multi = model.entries.some((entry) => {
+      const nodes = Array.isArray(entry?.nodes) ? entry.nodes.filter((node) => node.enabled !== false) : [];
+      return nodes.length > 1;
+    });
+    if (!multi) return false;
+    // Пересобирать имеет смысл только ради «развернуть»: только он просит
+    // разложить запись на отдельные узлы.
+    //
+    // «Свернуть» и «группами» в json не требуют ничего: запись провайдера и
+    // так одна запись — клиент показывает её одной строкой, а кандидаты живут
+    // внутри неё. Пересборка же ради них выбрасывала всё, кроме основного
+    // узла (у VPNUS — 11 адресов из 29), и заодно теряла записи с
+    // протоколами, которых не знает наш разбор, вроде Hysteria.
+    return mode === NODES_EXPAND;
+  } catch {
+    return false;
+  }
+}
+
 function buildJsonConfigBundleFromRaw(rawText) {
   const parsed = parseBulkProxyText(rawText);
   const configs = parsed
@@ -704,6 +697,10 @@ function buildJsonConfigBundleFromRaw(rawText) {
             },
             {
               type: "field",
+              // Критерий обязателен: правило без единого поля Xray отвергает
+              // с «this rule has no effective fields», и Happ показывает это
+              // предупреждение на каждую подписку. tcp+udp — «всё остальное».
+              network: "tcp,udp",
               outboundTag: outbound.tag,
             },
           ],
@@ -1327,11 +1324,49 @@ function resolveOutputFromUserAgent(userAgent, fallbackOutput = OUTPUT_DEFAULT) 
   const item = Array.isArray(catalog.items)
     ? catalog.items.find((entry) => sanitizeProfileToken(entry?.key || "") === appKey)
     : null;
-  const format = Array.isArray(item?.formats) && item.formats.length > 0
-    ? String(item.formats[0] || "").trim().toLowerCase()
-    : "";
-  const output = format === "raw" ? OUTPUT_RAW : OUTPUT_CLASH;
-  return { output, app: appKey, matched: true };
+  const supported = (Array.isArray(item?.formats) ? item.formats : [])
+    .map((value) => outputFromCatalogFormat(value))
+    .filter(Boolean);
+  // Про клиента ничего не знаем — отдаём то, что выбрано в подписке.
+  if (supported.length === 0) {
+    return { output: fallback, app: appKey, matched: true, bySource: false };
+  }
+  // Клиент читает и плоский список, и бандл Xray (это про Happ). Что из двух
+  // отдать, решает формат источника: json имеет смысл, когда источник сам
+  // json, иначе это тот же список, только втрое объёмнее. Окончательный выбор
+  // делается после запроса к провайдеру — здесь его ещё не из чего сделать.
+  if (supported.includes(OUTPUT_RAW) && supported.includes(OUTPUT_JSON)) {
+    return { output: OUTPUT_RAW, app: appKey, matched: true, bySource: true };
+  }
+  // Файл для proxy-providers — тоже Clash, просто другой роли. Клиенту Clash
+  // подменять его полным конфигом нельзя: его туда и выбрали осознанно.
+  if (supported.includes(OUTPUT_CLASH) && fallback === OUTPUT_CLASH_PROVIDER) {
+    return { output: OUTPUT_CLASH_PROVIDER, app: appKey, matched: true, bySource: false };
+  }
+  return { output: supported[0], app: appKey, matched: true, bySource: false };
+}
+
+/**
+ * Окончательный формат для клиентов, у которых он зависит от источника.
+ *
+ * Объединение — особый случай: оно собирается из разных источников, часть из
+ * которых не json вовсе, и приводить их к json всё равно приходится. Раз
+ * клиент json читает, отдаём ему json целиком.
+ */
+function finalizeOutputBySource(output, bySource, subUrl, body, contentType = "") {
+  if (!bySource) return output;
+  if (String(subUrl || "").startsWith("merge:")) return OUTPUT_JSON;
+  return detectSourceFormat(body, contentType) === "json" ? OUTPUT_JSON : OUTPUT_RAW;
+}
+
+/** Формат из каталога приложений — в выходной формат панели. */
+function outputFromCatalogFormat(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "raw") return OUTPUT_RAW;
+  if (token === "raw_base64" || token === "base64") return OUTPUT_RAW_BASE64;
+  if (token === "json") return OUTPUT_JSON;
+  if (token === "yml" || token === "yaml" || token === "clash") return OUTPUT_CLASH;
+  return "";
 }
 
 function normalizeClashGroupsParam(value) {
@@ -1536,10 +1571,11 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
         : OUTPUT_RAW
       : merged.profile.output || OUTPUT_DEFAULT);
   const requestUserAgent = String(firstHeaderValue(reqHeaders["user-agent"]) || "").trim();
-  const output =
-    outputAuto && requestUserAgent
-      ? resolveOutputFromUserAgent(requestUserAgent, fallbackOutput).output
-      : fallbackOutput;
+  const auto = outputAuto && requestUserAgent
+    ? resolveOutputFromUserAgent(requestUserAgent, fallbackOutput)
+    : null;
+  const output = auto ? auto.output : fallbackOutput;
+  const outputBySource = Boolean(auto?.bySource);
 
   const hwidFromQuery = String(reqUrl.searchParams.get("hwid") || "").trim();
   const hwidFromHeader = String(firstHeaderValue(reqHeaders["x-hwid"]) || "").trim();
@@ -1559,6 +1595,8 @@ function resolveRequestConfig(reqUrl, reqHeaders, forcedProfileName = "") {
     subUrl,
     output,
     outputAuto,
+    // Формат ещё не окончателен: он зависит от того, что пришлёт провайдер.
+    outputBySource,
     app,
     device,
     clashGroups,
@@ -1766,7 +1804,9 @@ function resolveLocalSourcePath(input) {
 
 function buildRequestUrlFromParams(params) {
   const reqUrl = new URL("http://localhost/sub");
-  for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups"]) {
+  // `nodes` здесь обязателен: без него источник объединения всегда собирался
+  // со свёрнутыми узлами, чего бы ни стояло у него в настройках.
+  for (const key of ["sub_url", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups", "nodes"]) {
     const value = params?.[key];
     if (value === undefined || value === null || value === "") continue;
     reqUrl.searchParams.set(key, String(value));
@@ -1796,6 +1836,20 @@ function buildRequestUrlFromParams(params) {
  * ничего: отдавать пустую подписку нельзя, приложение сочтёт её сломанной и
  * затрёт рабочий список.
  */
+/**
+ * Режим узлов источника внутри объединения.
+ *
+ * Объединение склеивается из плоских списков, и группы источника в нём не
+ * выживают ни в каком выходном формате: что в json, что в clash каждая строка
+ * становится самостоятельной записью. Поэтому «группами» здесь — это
+ * «свернуть», иначе запись вроде «Автовыбор Белые списки» рассыпается на
+ * кандидатов. «Развернуть» остаётся собой: его для того и выбирают.
+ */
+function mergeNodesMode(mode) {
+  const normalized = normalizeNodesMode(mode);
+  return normalized === NODES_GROUP ? NODES_COLLAPSE : normalized;
+}
+
 async function fetchMergedSource(mergeId) {
   const found = getMergedSource(mergeId);
   if (!found.ok) {
@@ -1814,11 +1868,19 @@ async function fetchMergedSource(mergeId) {
         throw new Error(config.error || "неверные параметры источника");
       }
       const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
-      const produced = await produceOutput(fetched.body, OUTPUT_RAW, { app: config.app });
+      // nodesMode — настройка самого источника: у JSON-подписок от неё зависит,
+      // приедет одна строка на запись или все её кандидаты по отдельности.
+      const produced = await produceOutput(fetched.body, OUTPUT_RAW, {
+        app: config.app,
+        nodesMode: mergeNodesMode(config.nodesMode),
+      });
       if (!produced.ok) {
         throw new Error(produced.error || "источник не разобрался");
       }
-      const selected = filterRawBody(produced.body, item?.filter, label);
+      // raw отдаёт подписку как есть, а провайдеры часто шлют её одной строкой
+      // base64. Без декодирования источник приезжал в объединение ровно одним
+      // «сервером» — этой самой строкой.
+      const selected = filterRawBody(decodeBase64IfNeeded(produced.body), item?.filter, label);
       sourceHeaders.push(fetched.responseHeaders || {});
       blocks.push(...selected.lines);
     } catch (e) {
@@ -1865,12 +1927,19 @@ async function previewMergeItems(items) {
     }
     try {
       const fetched = await fetchWithNode(config.subUrl, config.forwardHeaders);
-      const produced = await produceOutput(fetched.body, OUTPUT_RAW, { app: config.app });
+      // Предпросмотр должен показывать ровно то, что попадёт в объединение,
+      // поэтому режим узлов у него тот же самый.
+      const produced = await produceOutput(fetched.body, OUTPUT_RAW, {
+        app: config.app,
+        nodesMode: mergeNodesMode(config.nodesMode),
+      });
       if (!produced.ok) {
         out.push({ ok: false, error: produced.error || "failed to convert", names: [] });
         continue;
       }
-      const names = rawLines(produced.body).map((line) => nameFromRawLine(line) || line);
+      // Как и в самом объединении: base64 без декодирования выглядит одной
+      // строкой, и предпросмотр показывал бы один «сервер» вместо всех.
+      const names = rawLines(decodeBase64IfNeeded(produced.body)).map((line) => nameFromRawLine(line) || line);
       out.push({ ok: true, error: "", names });
     } catch (e) {
       out.push({ ok: false, error: e?.message || "fetch failed", names: [] });
@@ -1931,18 +2000,30 @@ async function produceOutput(rawText, output, options = {}) {
     if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
       try {
         const parsed = JSON.parse(trimmed);
-        return {
-          ok: true,
-          body: JSON.stringify(parsed, null, 2),
-          contentType: "application/json; charset=utf-8",
-          conversion: "none-json",
-        };
+        // Подписку провайдера отдаём как есть: в его конфиге свои dns, inbounds
+        // и маршруты, и пересобирать их нам нечем. Но если внутри записи сидят
+        // несколько узлов, то выбор «свернуть/группами/развернуть» перестаёт
+        // работать — ради него такую подписку пересобираем.
+        if (!jsonBundleNeedsNodesMode(trimmed, options)) {
+          return {
+            ok: true,
+            body: JSON.stringify(parsed, null, 2),
+            contentType: "application/json; charset=utf-8",
+            conversion: "none-json",
+          };
+        }
       } catch {
         // fall through to raw->json conversion
       }
     }
 
-    const rawResult = await produceOutput(rawText, OUTPUT_RAW, options);
+    // «Группами» в JSON смысла не имеет: групп в этом формате нет, и запись с
+    // кандидатами разъезжалась на несколько отдельных конфигов вместо одного.
+    // Собираем её как «свернуть», а «развернуть» остаётся собой.
+    const jsonOptions = normalizeNodesMode(options.nodesMode) === NODES_GROUP
+      ? { ...options, nodesMode: NODES_COLLAPSE }
+      : options;
+    const rawResult = await produceOutput(rawText, OUTPUT_RAW, jsonOptions);
     if (!rawResult.ok) return rawResult;
     // raw отдаёт подписку как есть, а провайдеры часто присылают её в base64.
     // Для raw это нормально — клиент декодирует сам, — но собирать JSON из
@@ -2009,6 +2090,27 @@ async function produceOutput(rawText, output, options = {}) {
     return { ok: true, body: out, contentType: "text/plain; charset=utf-8", conversion };
   }
 
+  // Файл для proxy-providers: тот же Clash, только без групп и правил.
+  // Группы там всё равно не работают, поэтому «группами» сворачиваем — иначе
+  // запись с кандидатами рассыпается в провайдере на отдельные строки.
+  if (output === OUTPUT_CLASH_PROVIDER) {
+    const full = await produceOutput(rawText, OUTPUT_CLASH, {
+      ...options,
+      nodesMode: normalizeNodesMode(options.nodesMode) === NODES_GROUP ? NODES_COLLAPSE : options.nodesMode,
+    });
+    if (!full.ok) return full;
+    const proxies = parseClashProxyList(full.body);
+    if (proxies.length === 0) {
+      return { ok: false, error: "в подписке не нашлось ни одного прокси" };
+    }
+    return {
+      ok: true,
+      body: buildYaml({ proxies }),
+      contentType: "text/yaml; charset=utf-8",
+      conversion: `${full.conversion}+provider`,
+    };
+  }
+
   if (output !== OUTPUT_CLASH) {
     return { ok: false, error: `unsupported output: ${output}` };
   }
@@ -2056,8 +2158,16 @@ async function produceOutput(rawText, output, options = {}) {
   return { ok: true, body: out, contentType: "text/yaml; charset=utf-8", conversion };
 }
 
-async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "", device = "", req = null, clashGroups = "", nodesMode = NODES_MODE_DEFAULT) {
+async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = "", device = "", req = null, clashGroups = "", nodesMode = NODES_MODE_DEFAULT, outputBySource = false) {
   const fetched = await fetchWithNode(subUrl, forwardHeaders);
+  // Формат мог зависеть от источника — теперь источник в руках.
+  output = finalizeOutputBySource(
+    output,
+    outputBySource,
+    subUrl,
+    fetched.body,
+    fetched.responseHeaders?.["content-type"] || "",
+  );
   await persistSuccessfulSourceSnapshot({
     req,
     route: "/last",
@@ -2086,6 +2196,7 @@ async function refreshCache(subUrl, output, profileNames, forwardHeaders, app = 
     contentType: produced.contentType,
     responseHeaders: upstreamHeaders,
     conversion: produced.conversion,
+    output,
   };
 }
 
@@ -2093,7 +2204,9 @@ async function handleSubscription(req, res, forcedProfileName = "") {
   const startedAtMs = Date.now();
   const reqUrl = new URL(req.url || "/", "http://localhost");
   const config = resolveRequestConfig(reqUrl, req.headers, forcedProfileName);
-  const output = config.ok ? config.output : OUTPUT_DEFAULT;
+  // Изменяемый по той же причине, что и в /last: формат может зависеть от
+  // источника, а источник будет известен только после запроса к провайдеру.
+  let output = config.ok ? config.output : OUTPUT_DEFAULT;
 
   if (!config.ok) {
     res.writeHead(config.status || 400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -2141,6 +2254,13 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       forwardHeaders,
       fetched,
     });
+    output = finalizeOutputBySource(
+      output,
+      config.outputBySource,
+      subUrl,
+      fetched.body,
+      fetched.responseHeaders?.["content-type"] || "",
+    );
     const raw = fetched.body;
     const upstreamHeaders = sanitizeUpstreamResponseHeaders(fetched.responseHeaders);
 
@@ -2255,6 +2375,11 @@ async function handleSubscription(req, res, forcedProfileName = "") {
       durationMs: Date.now() - startedAtMs,
     });
   } catch (e) {
+    // Живого ответа нет — формат берём из памяти о прошлом удачном запросе,
+    // иначе json-подписка уедет клиенту плоским raw.
+    output = await outputFromRememberedSource(output, config.outputBySource, {
+      subUrl, app, device, profileNames, forwardHeaders,
+    });
     const fallback = await loadLatestStoredSnapshotBundle({
       subUrl,
       app,
@@ -2291,11 +2416,110 @@ async function handleSubscription(req, res, forcedProfileName = "") {
   }
 }
 
+/**
+ * Отдать `/last` из кэша, сохранённого в другом формате.
+ *
+ * Ключ кэша включает выходной формат, а с авто-форматом он зависит от клиента.
+ * Поэтому первый же клиент, попросивший формат, которого ещё не просили,
+ * получал 404 — хотя тело подписки лежало рядом, просто под другим ключом.
+ * Перегоняем то, что есть: это всё равно честнее отказа.
+ */
+/**
+ * Content-Type по выходному формату.
+ *
+ * Нужен там, где тело берут из кэша: у старых записей рядом нет меты, а
+ * подставлять на этот случай yaml — значит объявить raw-подписку конфигом
+ * Clash. Клиент, который yaml не читает, такую подписку просто отвергнет.
+ */
+function contentTypeForOutput(output) {
+  if (output === OUTPUT_JSON) return "application/json; charset=utf-8";
+  if (output === OUTPUT_CLASH_PROVIDER) return "text/yaml; charset=utf-8";
+  if (output === OUTPUT_RAW || output === OUTPUT_RAW_BASE64) return "text/plain; charset=utf-8";
+  return "text/yaml; charset=utf-8";
+}
+
+/**
+ * Последний известный формат источника.
+ *
+ * Нужен, когда провайдер не ответил. Формат для клиентов вроде Happ зависит от
+ * источника, а спросить источник в этот момент не у кого — и подписка уезжала
+ * плоским raw, хотя вчера была json. Прошлый снимок знает ответ.
+ */
+async function lastKnownSourceFormat({ subUrl = "", app = "", device = "", profileNames = [], forwardHeaders = {} }) {
+  try {
+    const feedKey = buildSubscriptionFeedKey({
+      subUrl,
+      app,
+      device,
+      profiles: profileNames,
+      hwid: String(forwardHeaders?.["x-hwid"] || "").trim(),
+    });
+    const feed = await getSubscriptionFeedByKey(feedKey);
+    if (!feed?.id) return "";
+    const snapshot = await getLatestSourceSnapshotForFeed(feed.id);
+    return String(snapshot?.sourceFormat || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Формат по памяти, когда живого ответа нет.
+ *
+ * Объединение всегда json — оно и так собирается из разного. Для остальных
+ * смотрим, чем источник оказался в прошлый раз.
+ */
+async function outputFromRememberedSource(output, bySource, context) {
+  if (!bySource) return output;
+  if (String(context?.subUrl || "").startsWith("merge:")) return OUTPUT_JSON;
+  const known = await lastKnownSourceFormat(context);
+  if (!known) return output;
+  return known === "json" ? OUTPUT_JSON : OUTPUT_RAW;
+}
+
+async function respondFromSiblingCache(res, { subUrl, output, profileKey, app, clashGroups, nodesMode }) {
+  for (const candidate of [OUTPUT_RAW, OUTPUT_CLASH, OUTPUT_JSON, OUTPUT_RAW_BASE64]) {
+    if (candidate === output) continue;
+    const key = cacheKey(subUrl, candidate, profileKey);
+    const path = cachePathForKey(key);
+    if (!fs.existsSync(path)) continue;
+    let body = "";
+    try {
+      body = fs.readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    if (!body.trim()) continue;
+    const produced = await produceOutput(body, output, { app, clashGroups, nodesMode });
+    if (!produced.ok) continue;
+    let responseHeaders = {};
+    try {
+      const meta = JSON.parse(fs.readFileSync(cacheMetaPathForKey(key), "utf8"));
+      if (meta && typeof meta.responseHeaders === "object" && meta.responseHeaders) {
+        responseHeaders = meta.responseHeaders;
+      }
+    } catch {
+      // меты может не быть — заголовки провайдера тогда просто не повторим
+    }
+    res.writeHead(200, {
+      ...responseHeaders,
+      "Content-Type": produced.contentType,
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(produced.body);
+    return candidate;
+  }
+  return "";
+}
+
 async function handleLast(req, res, forcedProfileName = "") {
   const startedAtMs = Date.now();
   const reqUrl = new URL(req.url || "/", "http://localhost");
   const config = resolveRequestConfig(reqUrl, req.headers, forcedProfileName);
-  const output = config.ok ? config.output : OUTPUT_DEFAULT;
+  // Изменяемый: у клиентов вроде Happ формат зависит от того, что пришлёт
+  // провайдер, и окончательно он известен только после запроса.
+  let output = config.ok ? config.output : OUTPUT_DEFAULT;
 
   if (!config.ok) {
     res.writeHead(config.status || 400, { "Content-Type": "text/plain; charset=utf-8" });
@@ -2331,9 +2555,19 @@ async function handleLast(req, res, forcedProfileName = "") {
 
   let refreshed = null;
   try {
-    refreshed = await refreshCache(subUrl, output, profileNames, forwardHeaders, app, device, req, clashGroups, nodesMode);
+    refreshed = await refreshCache(
+      subUrl, output, profileNames, forwardHeaders, app, device, req, clashGroups, nodesMode, config.outputBySource,
+    );
+    // Ключ кэша считается по формату, а обновление могло его уточнить.
+    if (refreshed?.output) output = refreshed.output;
   } catch {
     refreshed = null;
+  }
+  if (!refreshed?.output && config.outputBySource) {
+    // Провайдер не ответил — берём формат из памяти о прошлом успешном ответе.
+    output = await outputFromRememberedSource(output, config.outputBySource, {
+      subUrl, app, device, profileNames, forwardHeaders,
+    });
   }
   if (refreshed && refreshed.ok) {
     res.writeHead(200, {
@@ -2374,7 +2608,7 @@ async function handleLast(req, res, forcedProfileName = "") {
   const key = cacheKey(subUrl, output, [profileNames.join(","), clashGroups, nodesMode].filter(Boolean).join("|"));
   const path = cachePathForKey(key);
   try {
-    let contentType = "text/yaml; charset=utf-8";
+    let contentType = contentTypeForOutput(output);
     let responseHeaders = {};
     try {
       const meta = JSON.parse(fs.readFileSync(cacheMetaPathForKey(key), "utf8"));
@@ -2426,6 +2660,28 @@ async function handleLast(req, res, forcedProfileName = "") {
         app,
         device,
         cache: "snapshot-fallback",
+        durationMs: Date.now() - startedAtMs,
+        error: err?.message || String(err),
+      });
+      return;
+    }
+    const sibling = await respondFromSiblingCache(res, {
+      subUrl,
+      output,
+      profileKey: [profileNames.join(","), clashGroups, nodesMode].filter(Boolean).join("|"),
+      app,
+      clashGroups,
+      nodesMode,
+    });
+    if (sibling) {
+      logRequest({
+        route: "/last",
+        status: 200,
+        profiles: profileNames,
+        output,
+        app,
+        device,
+        cache: `converted-from-${sibling}`,
         durationMs: Date.now() - startedAtMs,
         error: err?.message || String(err),
       });
@@ -2529,11 +2785,13 @@ export {
   sourceFormatMatchesOutput,
   isEncryptedHappLink,
   decryptHappLink,
-  extractHappDecryptResult,
   parseProfileYaml,
   getUaCatalogOptions,
   resolveAppKeyFromUserAgent,
   resolveOutputFromUserAgent,
+  finalizeOutputBySource,
+  outputFromRememberedSource,
+  lastKnownSourceFormat,
   readProfileFile,
   profileExists,
   pickUserAgentProfile,

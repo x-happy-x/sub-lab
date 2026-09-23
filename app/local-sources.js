@@ -201,6 +201,54 @@ function getMergedSource(id) {
   }
 }
 
+/**
+ * Все объединения этой установки — для синхронизации.
+ *
+ * Состав объединения лежит файлом рядом с данными, а не в базе, поэтому в
+ * выгрузку он не попадал: на второй панели короткая ссылка `merge:<id>` была,
+ * а собирать по ней было нечего — подписка отвечала 404.
+ */
+function listMergedSources() {
+  ensureLocalSourcesDir();
+  const out = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(LOCAL_SOURCES_DIR);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const found = getMergedSource(name.slice(0, -".json".length));
+    if (found.ok) out.push(found.source);
+  }
+  return out;
+}
+
+/**
+ * Записать объединение, приехавшее с другой панели.
+ *
+ * Своё не затираем тем, что старее: у объединения есть собственная отметка
+ * времени, и правка на этой стороне не должна пропадать из-за обмена.
+ */
+function importMergedSource(raw) {
+  const id = String(raw?.id || "").trim();
+  if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) return false;
+  const incomingUpdatedAt = String(raw?.updatedAt || "");
+  const existing = getMergedSource(id);
+  if (existing.ok && existing.source.updatedAt && existing.source.updatedAt >= incomingUpdatedAt) {
+    return false;
+  }
+  ensureLocalSourcesDir();
+  writeMergedSource(id, {
+    name: sanitizeLocalSourceName(raw?.name) || id,
+    items: normalizeMergeItems(raw?.items),
+    createdAt: String(raw?.createdAt || incomingUpdatedAt || ""),
+    updatedAt: incomingUpdatedAt,
+  });
+  return true;
+}
+
 export {
   createLocalSource,
   createMergedSource,
@@ -208,5 +256,7 @@ export {
   normalizeMergeItems,
   getLocalSource,
   getMergedSource,
+  listMergedSources,
+  importMergedSource,
   resolveLocalSourceFilePath,
 };

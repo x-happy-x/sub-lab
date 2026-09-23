@@ -22,8 +22,8 @@ COPY app/node_modules ./node_modules
 COPY app/*.js ./
 # Нормализованная модель лежит в подкаталоге: `app/*.js` его не забирает.
 COPY app/model ./model
-COPY app/bin ./bin
 COPY resources/ua-catalog.json /resources/ua-catalog.json
+COPY resources/happ /resources/happ
 COPY resources/admin.json /resources/admin.json
 COPY resources/apps.yml /resources/apps.yml
 COPY resources/app-guides /resources/app-guides

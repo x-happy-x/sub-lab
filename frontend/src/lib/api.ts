@@ -21,7 +21,7 @@ import type {
   SubscriptionPayload,
   UACatalog,
 } from "../types";
-import type { FavoriteItem, SyncPeer, SyncPeerInput, SyncPeerTestResult } from "../types";
+import type { FavoriteItem, ShortLinkHealth, ShortLinkUserCounts, SyncPeer, SyncPeerInput, SyncPeerTestResult } from "../types";
 
 const PARAM_KEYS = ["sub_url", "endpoint", "output", "output_auto", "app", "device", "profile", "profiles", "hwid", "clash_groups", "nodes"] as const;
 
@@ -356,6 +356,23 @@ export async function parseBulkImport(text: string): Promise<ImportedProxyItem[]
   return Array.isArray(json.items) ? json.items as ImportedProxyItem[] : [];
 }
 
+/**
+ * Собрать ссылку `happ://crypt5/...` из обычной.
+ *
+ * Обратная операция к расшифровке: короткую ссылку панели удобно раздавать в
+ * том же виде, в каком её шлют провайдеры — Happ открывает её сам.
+ */
+export async function encryptHappSubscription(url: string): Promise<string> {
+  const resp = await fetch("/api/happ-encrypt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "happ encrypt failed");
+  return String(json.link || "");
+}
+
 export async function decryptHappSubscription(subUrl: string): Promise<{ originalUrl: string; resolvedUrl: string; changed: boolean }> {
   const resp = await fetch("/api/happ-decrypt", {
     method: "POST",
@@ -403,6 +420,18 @@ export async function updateShortLinkUserState(
   });
   const json = await resp.json();
   if (!resp.ok || !json.ok) throw new Error(json.error || "short-link user update failed");
+}
+
+/**
+ * Удалить короткую ссылку насовсем.
+ *
+ * Не то же самое, что убрать подписку из своего списка: адрес перестаёт
+ * отвечать у всех, кому его выдали.
+ */
+export async function deleteShortLink(id: string): Promise<void> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "short-link delete failed");
 }
 
 export async function deleteShortLinkUserEntry(id: string, hwid: string): Promise<void> {
@@ -876,6 +905,7 @@ export async function fetchUsageStats(days = 30): Promise<UsageStats> {
       blocked: Boolean(row?.blocked),
       firstSeenAt: String(row?.firstSeenAt || ""),
       lastSeenAt: String(row?.lastSeenAt || ""),
+      links: Math.max(1, Number(row?.links || 1)),
     })),
   };
 }
@@ -932,6 +962,7 @@ function normalizeSyncPeer(entry: unknown): SyncPeer {
     enabled: Boolean(row.enabled),
     intervalMinutes: Number(row.intervalMinutes || 0),
     includeProfiles: Boolean(row.includeProfiles),
+    pushEnabled: Boolean(row.pushEnabled),
     lastStatus: String(row.lastStatus || ""),
     lastError: String(row.lastError || ""),
     lastReport: report,
@@ -1005,7 +1036,7 @@ export async function testSyncPeer(input: SyncPeerInput & { id?: string }): Prom
   };
 }
 
-export async function runSyncPeer(id: string, options: { dryRun?: boolean } = {}): Promise<{ peer: SyncPeer; imported: Record<string, number> }> {
+export async function runSyncPeer(id: string, options: { dryRun?: boolean } = {}): Promise<{ peer: SyncPeer; imported: Record<string, number>; pushed: Record<string, number> | null }> {
   const resp = await fetch(`/api/sync/peers/${encodeURIComponent(id)}/pull`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1016,5 +1047,57 @@ export async function runSyncPeer(id: string, options: { dryRun?: boolean } = {}
   return {
     peer: normalizeSyncPeer(json.peer),
     imported: json.imported && typeof json.imported === "object" ? json.imported as Record<string, number> : {},
+    pushed: json.pushed && typeof json.pushed === "object" ? json.pushed as Record<string, number> : null,
   };
+}
+
+function normalizeHealth(entry: unknown): ShortLinkHealth {
+  const row = (entry || {}) as Record<string, unknown>;
+  return {
+    shortLinkId: String(row.shortLinkId || ""),
+    checkedAt: String(row.checkedAt || ""),
+    ok: Boolean(row.ok),
+    unreachable: Boolean(row.unreachable),
+    status: Number(row.status || 0),
+    error: String(row.error || ""),
+    servers: Number(row.servers || 0),
+    upload: Number(row.upload || 0),
+    download: Number(row.download || 0),
+    total: Number(row.total || 0),
+    expireAt: Number(row.expireAt || 0),
+    supportUrl: String(row.supportUrl || ""),
+    webPageUrl: String(row.webPageUrl || ""),
+    providerTitle: String(row.providerTitle || ""),
+  };
+}
+
+function normalizeUserCounts(entry: unknown): ShortLinkUserCounts {
+  const row = (entry || {}) as Record<string, unknown>;
+  return {
+    shortLinkId: String(row.shortLinkId || ""),
+    total: Number(row.total || 0),
+    active: Number(row.active || 0),
+    blocked: Number(row.blocked || 0),
+    overLimit: Number(row.overLimit || 0),
+    maxUsers: Number(row.maxUsers || 0),
+  };
+}
+
+/** Проверки и счётчики устройств по всем доступным подпискам — одним запросом. */
+export async function fetchShortLinkHealth(): Promise<{ health: ShortLinkHealth[]; users: ShortLinkUserCounts[] }> {
+  const resp = await fetch("/api/short-links/health");
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "health fetch failed");
+  return {
+    health: Array.isArray(json.health) ? json.health.map(normalizeHealth) : [],
+    users: Array.isArray(json.users) ? json.users.map(normalizeUserCounts) : [],
+  };
+}
+
+/** Проверить одну подписку прямо сейчас. */
+export async function checkShortLinkHealth(id: string): Promise<ShortLinkHealth> {
+  const resp = await fetch(`/api/short-links/${encodeURIComponent(id)}/health`, { method: "POST" });
+  const json = await resp.json();
+  if (!resp.ok || !json.ok) throw new Error(json.error || "health check failed");
+  return normalizeHealth(json.health);
 }

@@ -24,6 +24,7 @@ type Draft = {
   enabled: boolean;
   intervalMinutes: number;
   includeProfiles: boolean;
+  pushEnabled: boolean;
 };
 
 const EMPTY_DRAFT: Draft = {
@@ -33,6 +34,7 @@ const EMPTY_DRAFT: Draft = {
   enabled: true,
   intervalMinutes: 0,
   includeProfiles: true,
+  pushEnabled: true,
 };
 
 const INTERVALS: Array<[number, string]> = [
@@ -53,6 +55,7 @@ const SECTION_TITLES: Record<string, string> = {
   userHistory: "история",
   subscriptionOverrides: "overrides",
   profileFiles: "профили",
+  hitCounters: "счётчики",
 };
 
 function formatCounts(value: unknown): string {
@@ -78,6 +81,7 @@ function draftFromPeer(peer: SyncPeer): Draft {
     enabled: peer.enabled,
     intervalMinutes: peer.intervalMinutes,
     includeProfiles: peer.includeProfiles,
+    pushEnabled: peer.pushEnabled,
   };
 }
 
@@ -141,6 +145,14 @@ function PeerForm({ draft, onChange, tokenHint }: {
           onChange={(e) => onChange({ ...draft, includeProfiles: e.target.checked })}
         />
         <span>Забирать профили и UA-каталог</span>
+      </label>
+      <label className="sync-check">
+        <input
+          type="checkbox"
+          checked={draft.pushEnabled}
+          onChange={(e) => onChange({ ...draft, pushEnabled: e.target.checked })}
+        />
+        <span>Досылать туда то, чего там нет</span>
       </label>
     </div>
   );
@@ -210,6 +222,7 @@ export function SyncPeersPanel({ notify, onSynced }: Props) {
       enabled: addDraft.enabled,
       intervalMinutes: addDraft.intervalMinutes,
       includeProfiles: addDraft.includeProfiles,
+      pushEnabled: addDraft.pushEnabled,
     });
     setAddDraft(EMPTY_DRAFT);
     setAddOpen(false);
@@ -225,6 +238,7 @@ export function SyncPeersPanel({ notify, onSynced }: Props) {
       enabled: editDraft.enabled,
       intervalMinutes: editDraft.intervalMinutes,
       includeProfiles: editDraft.includeProfiles,
+      pushEnabled: editDraft.pushEnabled,
     });
     setEditingId("");
     notify("success", "Настройки сохранены");
@@ -234,11 +248,15 @@ export function SyncPeersPanel({ notify, onSynced }: Props) {
   const onRun = (peer: SyncPeer, dryRun: boolean) => guard(`run:${peer.id}`, async () => {
     const result = await runSyncPeer(peer.id, { dryRun });
     const counts = formatCounts(result.imported);
+    const pushedCounts = formatCounts(result.pushed);
     notify(
       "success",
       dryRun
         ? `Проверка прошла, импорта не было${counts ? ` — ${counts}` : ""}`
-        : `Синхронизировано${counts ? `: ${counts}` : ", изменений нет"}`,
+        : [
+          `Забрали${counts ? `: ${counts}` : " — нового нет"}`,
+          result.pushed ? `отдали${pushedCounts ? `: ${pushedCounts}` : " — нового нет"}` : "",
+        ].filter(Boolean).join("; "),
     );
     await refresh();
     if (!dryRun) onSynced?.();
@@ -258,8 +276,9 @@ export function SyncPeersPanel({ notify, onSynced }: Props) {
       <div className="admin-section-head">
         <h2>Синхронизация</h2>
         <p>
-          Связь односторонняя: эта установка сама ходит к удалённой за изменениями и накатывает их у себя.
-          Удалённая при этом ничего не знает — ей достаточно отдавать выгрузку по токену.
+          Ходит всегда только эта установка: забирает изменения с удалённой и, если включена досылка,
+          отдаёт туда то, чего там нет. Удалённая ничего не инициирует — ей достаточно отдавать выгрузку
+          и принимать импорт по токену.
           {scheduled > 0 ? ` Сейчас по расписанию: ${scheduled}.` : ""}
         </p>
       </div>
@@ -295,6 +314,7 @@ export function SyncPeersPanel({ notify, onSynced }: Props) {
                 </div>
                 <div className="labels">
                   {peer.enabled ? null : <Badge>выключен</Badge>}
+                  <Badge>{peer.pushEnabled ? "в обе стороны" : "только забирать"}</Badge>
                   <Badge>
                     {peer.intervalMinutes > 0
                       ? (INTERVALS.find(([m]) => m === peer.intervalMinutes)?.[1] || `раз в ${peer.intervalMinutes} мин`)

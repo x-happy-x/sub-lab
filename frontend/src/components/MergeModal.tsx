@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FavoriteItem, MergeItem, MergeOnEmpty, MergePreviewResult, SubscriptionPayload } from "../types";
 import { Badge, Button, Segmented, TextInput, Tooltip } from "../ui";
 import { Modal } from "./Modal";
+import { ServerList, ServerRow } from "./ServerRow";
+import { BYPASS_PATTERN as WHITELIST_PATTERN } from "../lib/servers";
 import { CloseIcon, PlusIcon, SaveIcon, TestIcon } from "../icons";
 
-const WHITELIST_PATTERN = "whitelist|white|бел[ыо]|обход|bypass|direct|lte|4g|3g";
 
 /**
  * Готовые регулярки под привычные названия «белых» серверов.
@@ -26,6 +27,18 @@ const PATTERN_PRESETS: ReadonlyArray<{ label: string; pattern: string; tip: stri
   },
 ];
 
+/**
+ * Как разворачивать записи JSON-подписки внутри объединения.
+ *
+ * У каждого источника свой: одна подписка отдаёт готовые узлы, другая —
+ * записи с кандидатами внутри, и сворачивать их одинаково нельзя.
+ */
+const NODES_OPTIONS = [
+  { value: "collapse", label: "свернуть", tip: "Одна строка на запись. Кандидаты балансировщика остаются внутри и в объединение не попадают." },
+  { value: "group", label: "группами", tip: "Запись с несколькими кандидатами отдаёт в объединение всех своих кандидатов. В JSON групп нет — там это то же, что «свернуть»." },
+  { value: "expand", label: "развернуть", tip: "Каждый узел записи становится отдельным сервером объединения." },
+] as const;
+
 const ON_EMPTY_OPTIONS = [
   { value: "all", label: "Взять все", tip: "Регулярка ничего не нашла — берём все серверы источника" },
   { value: "skip", label: "Пропустить", tip: "Источник не попадёт в объединение вовсе" },
@@ -41,6 +54,8 @@ export type MergeDraftItem = {
   selected: boolean;
   pattern: string;
   onEmpty: MergeOnEmpty;
+  /** Режим узлов для этого источника: «collapse» | «group» | «expand». */
+  nodes: string;
 };
 
 type Props = {
@@ -54,6 +69,15 @@ type Props = {
   outputAuto: boolean;
   onOutputAutoChange: (value: boolean) => void;
   outputOptions: ReadonlyArray<{ value: string; label: string; tip?: string }>;
+  /** Идентификатор короткой ссылки: пусто — сервер придумает сам. */
+  shortId: string;
+  onShortIdChange: (value: string) => void;
+  /** Короткую ссылку существующего объединения уже не переименовать. */
+  shortIdLocked: boolean;
+  tags: string;
+  onTagsChange: (value: string) => void;
+  hidden: boolean;
+  onHiddenChange: (value: boolean) => void;
   items: MergeDraftItem[];
   onItemsChange: (next: MergeDraftItem[]) => void;
   /** Имена серверов по ключу строки: их присылает предпросмотр. */
@@ -86,6 +110,7 @@ function buildFavoriteDrafts(favorites: FavoriteItem[]): MergeDraftItem[] {
     selected: false,
     pattern: "",
     onEmpty: "all" as MergeOnEmpty,
+    nodes: String(item.payload?.nodes || "collapse"),
   }));
 }
 
@@ -156,6 +181,16 @@ function MergeRow({
           </div>
 
           <div className="field">
+            <span className="field-label">Серверы из JSON-подписки</span>
+            <Segmented
+              ariaLabel="Серверы из JSON-подписки"
+              value={item.nodes || "collapse"}
+              onChange={(value) => onChange({ nodes: value })}
+              options={NODES_OPTIONS.map((option) => ({ value: option.value, label: option.label, tip: option.tip }))}
+            />
+          </div>
+
+          <div className="field">
             <span className="field-label">Если ничего не подошло</span>
             <Segmented
               ariaLabel="Поведение, когда регулярка ничего не нашла"
@@ -180,16 +215,15 @@ function MergeRow({
                     </span>
                   ) : null}
                 </div>
-                <ul className="merge-names">
-                  {names.slice(0, 60).map((name, index) => {
-                    const hit = !regex || regex.test(name);
-                    return (
-                      <li key={`${name}-${index}`} className={hit ? "hit" : "miss"}>
-                        <span>{name}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
+                <ServerList className="merge-names">
+                  {names.slice(0, 60).map((name, index) => (
+                    <ServerRow
+                      key={`${name}-${index}`}
+                      name={name}
+                      muted={regex !== null && !regex.test(name)}
+                    />
+                  ))}
+                </ServerList>
                 {names.length > 60 ? (
                   <div className="composer-meta-hint">…и ещё {names.length - 60}</div>
                 ) : null}
@@ -218,6 +252,13 @@ export function MergeModal({
   outputAuto,
   onOutputAutoChange,
   outputOptions,
+  shortId,
+  onShortIdChange,
+  shortIdLocked,
+  tags,
+  onTagsChange,
+  hidden,
+  onHiddenChange,
   items,
   onItemsChange,
   preview,
@@ -292,6 +333,33 @@ export function MergeModal({
           checked={outputAuto}
           onChange={(e) => onOutputAutoChange(e.target.checked)}
         />
+      </label>
+
+      <div className="field-row">
+        <div className="field">
+          <span className="field-label">Короткая ссылка</span>
+          <TextInput
+            placeholder={shortIdLocked ? "" : "merged-home или пусто для генерации"}
+            value={shortId}
+            disabled={shortIdLocked}
+            onChange={(e) => onShortIdChange(e.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80))}
+          />
+          {shortIdLocked ? (
+            <span className="field-hint">Адрес уже выдан клиентам — менять его здесь нельзя.</span>
+          ) : null}
+        </div>
+        <div className="field">
+          <span className="field-label">Теги</span>
+          <TextInput placeholder="дом, обход" value={tags} onChange={(e) => onTagsChange(e.target.value)} />
+        </div>
+      </div>
+
+      <label className="switch-row">
+        <span className="switch-row-text">
+          <span>Скрыть подписку по короткой ссылке</span>
+          <small>Публичные `/l/{shortId || "..."}` и meta API ответят 404. В кабинете объединение останется на месте.</small>
+        </span>
+        <input type="checkbox" checked={hidden} onChange={(e) => onHiddenChange(e.target.checked)} />
       </label>
 
       <div className="form-section-head merge-section-head">

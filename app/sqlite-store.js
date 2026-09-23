@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import initSqlJs from "sql.js";
 import { MAX_SNAPSHOTS_PER_FEED } from "./config.js";
+import { listMergedSources, importMergedSource } from "./local-sources.js";
 
 const DATA_ROOT_DIR = path.resolve(process.env.SUB_LAB_DATA_DIR || process.env.SUB_MIRROR_DATA_DIR || "/data");
 const DB_PATH = path.join(DATA_ROOT_DIR, "sub-lab.sqlite");
@@ -146,8 +147,54 @@ function runMigrations(db) {
     CREATE TABLE IF NOT EXISTS short_link_daily_hits (
       short_link_id TEXT NOT NULL,
       day TEXT NOT NULL,
+      origin TEXT NOT NULL DEFAULT '',
       hits INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (short_link_id, day)
+      PRIMARY KEY (short_link_id, day, origin)
+    );
+  `);
+  // Посуточные счётчики появились раньше синхронизации и хранились без
+  // установки-источника. Ключ поменялся, а ALTER TABLE первичный ключ не
+  // трогает — таблицу приходится пересобирать.
+  migrateDailyHitsToOrigin(db);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS short_link_health (
+      short_link_id TEXT PRIMARY KEY,
+      checked_at TEXT NOT NULL,
+      ok INTEGER NOT NULL DEFAULT 0,
+      unreachable INTEGER NOT NULL DEFAULT 0,
+      status INTEGER NOT NULL DEFAULT 0,
+      error TEXT NOT NULL DEFAULT '',
+      servers INTEGER NOT NULL DEFAULT 0,
+      upload INTEGER NOT NULL DEFAULT 0,
+      download INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL DEFAULT 0,
+      expire_at INTEGER NOT NULL DEFAULT 0,
+      support_url TEXT NOT NULL DEFAULT '',
+      web_page_url TEXT NOT NULL DEFAULT '',
+      provider_title TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS short_link_hit_totals (
+      short_link_id TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (short_link_id, origin)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS app_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS deleted_short_links (
+      id TEXT PRIMARY KEY,
+      deleted_at TEXT NOT NULL,
+      deleted_by TEXT NOT NULL DEFAULT ''
     );
   `);
   db.run(`
@@ -159,6 +206,7 @@ function runMigrations(db) {
       enabled INTEGER NOT NULL DEFAULT 1,
       interval_minutes INTEGER NOT NULL DEFAULT 0,
       include_profiles INTEGER NOT NULL DEFAULT 1,
+      push_enabled INTEGER NOT NULL DEFAULT 1,
       last_status TEXT NOT NULL DEFAULT '',
       last_error TEXT NOT NULL DEFAULT '',
       last_report_json TEXT NOT NULL DEFAULT '{}',
@@ -255,6 +303,18 @@ function runMigrations(db) {
   ensureColumnExists(db, "short_links", "hidden", "INTEGER NOT NULL DEFAULT 0");
   ensureColumnExists(db, "short_links", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumnExists(db, "subscription_feeds", "hwid", "TEXT NOT NULL DEFAULT ''");
+  ensureColumnExists(db, "sync_peers", "push_enabled", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumnExists(db, "short_link_health", "unreachable", "INTEGER NOT NULL DEFAULT 0");
+  // Первые проверки записались до того, как появилось различие «не дозвонились»
+  // и «подписка мертва»: у них осталось сырое undici-шное «fetch failed».
+  // Помечаем их недостижимыми, чтобы обход перепроверил их в ближайший час,
+  // а не красил карточки в красное сутки.
+  db.run(`
+    UPDATE short_link_health
+    SET unreachable = 1
+    WHERE unreachable = 0 AND ok = 0
+      AND (error = 'fetch failed' OR error LIKE 'Failed to parse URL%' OR error LIKE 'terminated%')
+  `);
   ensureColumnExists(db, "subscription_feeds", "last_success_source_snapshot_id", "INTEGER");
 }
 
@@ -632,6 +692,11 @@ async function createShortLinkRow(id, input) {
   `);
   stmt.run([id, JSON.stringify(params), title, ownerUsername, hidden, JSON.stringify(tags), now, now]);
   stmt.free();
+  // Тот же идентификатор могли когда-то удалить. Снимаем надгробие, иначе
+  // первая же синхронизация снесёт свежую ссылку как «удалённую».
+  const graveStmt = db.prepare("DELETE FROM deleted_short_links WHERE id = ?");
+  graveStmt.run([id]);
+  graveStmt.free();
   saveDb(db);
   return { id, params, title, ownerUsername, hidden: Boolean(hidden), tags, createdAt: now, updatedAt: now, hits: 0 };
 }
@@ -746,20 +811,129 @@ function dayKey(value = new Date()) {
  * график активности построить не из чего, история устройств пишется только на
  * первую встречу и на смену данных.
  */
-async function incrementShortLinkHits(id) {
+/**
+ * Пересборка посуточных счётчиков под ключ с установкой-источником.
+ *
+ * Таблица появилась до синхронизации, когда панель была одна и колонка origin
+ * была не нужна. Первичный ключ через ALTER TABLE не меняется, поэтому старые
+ * строки переносим в новую таблицу — с пустым origin, который проставит
+ * первое же обращение к идентификатору установки.
+ */
+function migrateDailyHitsToOrigin(db) {
+  const infoStmt = db.prepare("PRAGMA table_info(short_link_daily_hits)");
+  const columns = new Set();
+  while (infoStmt.step()) columns.add(String(infoStmt.getAsObject()?.name || ""));
+  infoStmt.free();
+  if (columns.has("origin")) return;
+
+  db.run(`
+    CREATE TABLE short_link_daily_hits_v2 (
+      short_link_id TEXT NOT NULL,
+      day TEXT NOT NULL,
+      origin TEXT NOT NULL DEFAULT '',
+      hits INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (short_link_id, day, origin)
+    );
+  `);
+  db.run(`
+    INSERT INTO short_link_daily_hits_v2 (short_link_id, day, origin, hits)
+    SELECT short_link_id, day, '', hits FROM short_link_daily_hits
+  `);
+  db.run("DROP TABLE short_link_daily_hits");
+  db.run("ALTER TABLE short_link_daily_hits_v2 RENAME TO short_link_daily_hits");
+}
+
+let installationIdCache = "";
+
+/**
+ * Идентификатор этой установки.
+ *
+ * Нужен, чтобы при синхронизации не путать свои просмотры с чужими. Без него
+ * счётчики двух панелей либо складывались бы заново при каждом обмене, либо
+ * затирали друг друга — и статистике нельзя было бы верить.
+ */
+async function getInstallationId() {
+  if (installationIdCache) return installationIdCache;
   const db = await getDb();
+  const rows = allRows(db, "SELECT value FROM app_meta WHERE key = 'installation_id' LIMIT 1");
+  const existing = rows.length ? String(rows[0].value || "").trim() : "";
+  if (existing) {
+    installationIdCache = existing;
+    return existing;
+  }
+  const next = crypto.randomUUID();
+  const stmt = db.prepare("INSERT OR REPLACE INTO app_meta (key, value, updated_at) VALUES ('installation_id', ?, ?)");
+  stmt.run([next, nowIso()]);
+  stmt.free();
+  adoptOrphanHitCounters(db, next);
+  saveDb(db);
+  installationIdCache = next;
+  return next;
+}
+
+/**
+ * Присвоить этой установке всё, что накопилось до появления origin.
+ *
+ * Выполняется ровно один раз — вместе с созданием идентификатора. Счётчик
+ * short_links.hits вёлся с самого начала, и терять его при переходе на
+ * раздельный учёт нельзя.
+ */
+function adoptOrphanHitCounters(db, origin) {
+  const daily = db.prepare("UPDATE short_link_daily_hits SET origin = ? WHERE origin = ''");
+  daily.run([origin]);
+  daily.free();
+  const seed = db.prepare(`
+    INSERT INTO short_link_hit_totals (short_link_id, origin, hits, updated_at)
+    SELECT id, ?, hits, ? FROM short_links WHERE hits > 0
+    ON CONFLICT (short_link_id, origin) DO UPDATE SET
+      hits = MAX(short_link_hit_totals.hits, excluded.hits),
+      updated_at = excluded.updated_at
+  `);
+  seed.run([origin, nowIso()]);
+  seed.free();
+}
+
+/** Просмотры по каждой ссылке — сумма всех установок, своих и приехавших. */
+function hitTotalsFor(db, ids) {
+  const totals = new Map(ids.map((id) => [id, 0]));
+  if (ids.length === 0) return totals;
+  for (const row of allRows(db, `
+    SELECT short_link_id, SUM(hits) AS hits
+    FROM short_link_hit_totals
+    WHERE short_link_id IN (${placeholders(ids.length)})
+    GROUP BY short_link_id
+  `, ids)) {
+    totals.set(String(row.short_link_id || ""), Math.max(0, Number(row.hits || 0)));
+  }
+  return totals;
+}
+
+async function incrementShortLinkHits(id) {
   const linkId = String(id || "").trim();
   if (!linkId) return;
+  const origin = await getInstallationId();
+  const db = await getDb();
   const stmt = db.prepare("UPDATE short_links SET hits = hits + 1 WHERE id = ?");
   stmt.run([linkId]);
   stmt.free();
   const dailyStmt = db.prepare(`
-    INSERT INTO short_link_daily_hits (short_link_id, day, hits)
-    VALUES (?, ?, 1)
-    ON CONFLICT (short_link_id, day) DO UPDATE SET hits = hits + 1
+    INSERT INTO short_link_daily_hits (short_link_id, day, origin, hits)
+    VALUES (?, ?, ?, 1)
+    ON CONFLICT (short_link_id, day, origin) DO UPDATE SET hits = hits + 1
   `);
-  dailyStmt.run([linkId, dayKey()]);
+  dailyStmt.run([linkId, dayKey(), origin]);
   dailyStmt.free();
+  // Свою строку в общей таблице держим в актуальном состоянии сразу: иначе
+  // после синхронизации пришлось бы гадать, чьи это просмотры.
+  const totalStmt = db.prepare(`
+    INSERT INTO short_link_hit_totals (short_link_id, origin, hits, updated_at)
+    VALUES (?, ?, 1, ?)
+    ON CONFLICT (short_link_id, origin) DO UPDATE SET
+      hits = short_link_hit_totals.hits + 1,
+      updated_at = excluded.updated_at
+  `);
+  totalStmt.run([linkId, origin, nowIso()]);
+  totalStmt.free();
   saveDb(db);
 }
 
@@ -1478,6 +1652,50 @@ async function recordShortLinkUserVisit(shortLinkId, hwid, info) {
   return { ok: true, code: "ok" };
 }
 
+/**
+ * Сколько устройств на каждой подписке — для карточек.
+ *
+ * Лимит проверяется при регистрации, поэтому в обычной жизни устройств сверх
+ * него не бывает. Но лимит можно опустить задним числом, и тогда часть уже
+ * зарегистрированных оказывается лишней — это и есть «сверх лимита».
+ */
+async function listShortLinkUserCounts(ids) {
+  const list = (Array.isArray(ids) ? ids : []).map((value) => String(value || "").trim()).filter(Boolean);
+  if (list.length === 0) return [];
+  const db = await getDb();
+  const marks = placeholders(list.length);
+
+  const counts = new Map(list.map((id) => [id, { shortLinkId: id, total: 0, blocked: 0, overLimit: 0, maxUsers: 0 }]));
+  for (const row of allRows(db, `
+    SELECT short_link_id, COUNT(1) AS total, SUM(CASE WHEN blocked > 0 THEN 1 ELSE 0 END) AS blocked
+    FROM short_link_users
+    WHERE short_link_id IN (${marks})
+    GROUP BY short_link_id
+  `, list)) {
+    const bucket = counts.get(String(row.short_link_id || ""));
+    if (!bucket) continue;
+    bucket.total = Math.max(0, Number(row.total || 0));
+    bucket.blocked = Math.max(0, Number(row.blocked || 0));
+  }
+
+  for (const row of allRows(db, `
+    SELECT short_link_id, max_users
+    FROM short_link_user_policy
+    WHERE short_link_id IN (${marks})
+  `, list)) {
+    const bucket = counts.get(String(row.short_link_id || ""));
+    if (!bucket) continue;
+    bucket.maxUsers = Math.max(0, Number(row.max_users || 0));
+  }
+
+  for (const bucket of counts.values()) {
+    const active = Math.max(0, bucket.total - bucket.blocked);
+    bucket.active = active;
+    bucket.overLimit = bucket.maxUsers > 0 ? Math.max(0, active - bucket.maxUsers) : 0;
+  }
+  return [...counts.values()];
+}
+
 async function listShortLinkUsers(shortLinkId) {
   const db = await getDb();
   const id = String(shortLinkId || "").trim();
@@ -1617,6 +1835,245 @@ async function deleteShortLinkUser(shortLinkId, hwid) {
   historyStmt.free();
   saveDb(db);
   return true;
+}
+
+/**
+ * Удалить короткую ссылку со всем, что к ней привязано.
+ *
+ * Возврата нет: адрес `/l/<id>` перестанет отвечать у всех, кому его выдали.
+ * Поэтому вызывающая сторона обязана сама проверить права и спросить человека.
+ */
+/** Когда ссылку удалили, если удалили. Пусто — жива или никогда не существовала. */
+async function getShortLinkTombstone(id) {
+  const db = await getDb();
+  const rows = allRows(db, "SELECT id, deleted_at, deleted_by FROM deleted_short_links WHERE id = ? LIMIT 1", [String(id || "")]);
+  if (!rows.length) return null;
+  return {
+    id: String(rows[0].id || ""),
+    deletedAt: String(rows[0].deleted_at || ""),
+    deletedBy: normalizeUsername(rows[0].deleted_by),
+  };
+}
+
+/**
+ * Забыть про удаление.
+ *
+ * Нужно ровно в одном месте: когда ссылку с тем же идентификатором создают
+ * заново. Иначе надгробие снесло бы её на первой же синхронизации.
+ */
+async function forgetShortLinkTombstone(id) {
+  const db = await getDb();
+  const stmt = db.prepare("DELETE FROM deleted_short_links WHERE id = ?");
+  stmt.run([String(id || "")]);
+  stmt.free();
+  saveDb(db);
+}
+
+function toPublicHealth(row) {
+  return {
+    shortLinkId: String(row?.short_link_id || ""),
+    checkedAt: String(row?.checked_at || ""),
+    ok: Number(row?.ok || 0) > 0,
+    // До провайдера не достучались — это не «подписка мертва», а «мы не знаем».
+    unreachable: Number(row?.unreachable || 0) > 0,
+    status: Math.max(0, Number(row?.status || 0)),
+    error: String(row?.error || ""),
+    servers: Math.max(0, Number(row?.servers || 0)),
+    upload: Math.max(0, Number(row?.upload || 0)),
+    download: Math.max(0, Number(row?.download || 0)),
+    total: Math.max(0, Number(row?.total || 0)),
+    expireAt: Math.max(0, Number(row?.expire_at || 0)),
+    supportUrl: String(row?.support_url || ""),
+    webPageUrl: String(row?.web_page_url || ""),
+    providerTitle: String(row?.provider_title || ""),
+  };
+}
+
+/**
+ * Итог проверки подписки.
+ *
+ * Запись одна на ссылку: интересна последняя, история проверок никому не
+ * нужна, а расти таблице с ежедневным обходом было бы куда.
+ */
+async function upsertShortLinkHealth(input) {
+  const shortLinkId = String(input?.shortLinkId || "").trim();
+  if (!shortLinkId) throw new Error("invalid short link id");
+  const db = await getDb();
+  const stmt = db.prepare(`
+    INSERT INTO short_link_health (
+      short_link_id, checked_at, ok, unreachable, status, error, servers,
+      upload, download, total, expire_at, support_url, web_page_url, provider_title
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (short_link_id) DO UPDATE SET
+      checked_at = excluded.checked_at,
+      ok = excluded.ok,
+      unreachable = excluded.unreachable,
+      status = excluded.status,
+      error = excluded.error,
+      servers = excluded.servers,
+      upload = excluded.upload,
+      download = excluded.download,
+      total = excluded.total,
+      expire_at = excluded.expire_at,
+      support_url = excluded.support_url,
+      web_page_url = excluded.web_page_url,
+      provider_title = excluded.provider_title
+    WHERE excluded.checked_at >= short_link_health.checked_at
+  `);
+  stmt.run([
+    shortLinkId,
+    sanitizeIso(input?.checkedAt),
+    input?.ok ? 1 : 0,
+    input?.unreachable ? 1 : 0,
+    Math.max(0, Number(input?.status || 0)),
+    String(input?.error || "").slice(0, 400),
+    Math.max(0, Number(input?.servers || 0)),
+    Math.max(0, Number(input?.upload || 0)),
+    Math.max(0, Number(input?.download || 0)),
+    Math.max(0, Number(input?.total || 0)),
+    Math.max(0, Number(input?.expireAt || 0)),
+    String(input?.supportUrl || "").slice(0, 500),
+    String(input?.webPageUrl || "").slice(0, 500),
+    String(input?.providerTitle || "").slice(0, 200),
+  ]);
+  stmt.free();
+  saveDb(db);
+  return await getShortLinkHealth(shortLinkId);
+}
+
+async function getShortLinkHealth(id) {
+  const db = await getDb();
+  const rows = allRows(db, "SELECT * FROM short_link_health WHERE short_link_id = ? LIMIT 1", [String(id || "")]);
+  return rows.length ? toPublicHealth(rows[0]) : null;
+}
+
+/** Проверки по всем ссылкам, которые видит этот пользователь. */
+async function listShortLinkHealthFor(ids) {
+  const list = (Array.isArray(ids) ? ids : []).map((value) => String(value || "").trim()).filter(Boolean);
+  if (list.length === 0) return [];
+  const db = await getDb();
+  return allRows(
+    db,
+    `SELECT * FROM short_link_health WHERE short_link_id IN (${placeholders(list.length)})`,
+    list,
+  ).map(toPublicHealth);
+}
+
+/**
+ * Кого пора проверить.
+ *
+ * Ссылки без записи идут первыми — их ещё ни разу не смотрели. Объединения
+ * пропускаем: они ходят в несколько источников сразу, и «здоровье» у них
+ * складывается из чужих, уже проверенных подписок.
+ */
+async function listShortLinksDueForHealthCheck(maxAgeHours = 24, limit = 200, retryHours = 1) {
+  const db = await getDb();
+  const cutoff = new Date(Date.now() - Math.max(1, Number(maxAgeHours) || 24) * 3600 * 1000).toISOString();
+  // До кого не достучались, пробуем чаще: скорее всего это была наша авария,
+  // и ждать из-за неё сутки нет причин.
+  const retryCutoff = new Date(Date.now() - Math.max(1, Number(retryHours) || 1) * 3600 * 1000).toISOString();
+  return allRows(db, `
+    SELECT s.id AS id
+    FROM short_links s
+    LEFT JOIN short_link_health h ON h.short_link_id = s.id
+    WHERE h.short_link_id IS NULL
+       OR h.checked_at < ?
+       OR (h.unreachable = 1 AND h.checked_at < ?)
+    ORDER BY COALESCE(h.checked_at, '') ASC, s.updated_at DESC
+    LIMIT ?
+  `, [cutoff, retryCutoff, Math.max(1, Number(limit) || 200)]).map((row) => String(row.id || ""));
+}
+
+/** Строка короткой ссылки без async-обёртки: нужна внутри транзакций импорта. */
+function getShortLinkRowSync(db, id) {
+  const stmt = db.prepare("SELECT id, updated_at FROM short_links WHERE id = ? LIMIT 1");
+  stmt.bind([String(id || "")]);
+  const row = rowFromStmt(stmt);
+  stmt.free();
+  return row || null;
+}
+
+const SHORT_LINK_CHILD_TABLES = [
+  "short_link_access",
+  "short_link_users",
+  "short_link_user_history",
+  "short_link_user_policy",
+  "short_link_daily_hits",
+  "short_link_hit_totals",
+  "short_link_health",
+];
+
+/**
+ * Снести ссылку и всё, что к ней привязано.
+ *
+ * Без транзакции и без сохранения на диск: вызывающий сам решает, где у него
+ * границы — из импорта это одна большая транзакция на всю выгрузку.
+ */
+function purgeShortLinkRows(db, linkId) {
+  const removed = { access: 0, users: 0, history: 0, policy: 0, dailyHits: 0, hitTotals: 0, link: 0 };
+  const countOf = (table) => {
+    const stmt = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE short_link_id = ?`);
+    stmt.bind([linkId]);
+    const row = rowFromStmt(stmt);
+    stmt.free();
+    return Math.max(0, Number(row?.n || 0));
+  };
+  removed.access = countOf("short_link_access");
+  removed.users = countOf("short_link_users");
+  removed.history = countOf("short_link_user_history");
+  removed.policy = countOf("short_link_user_policy");
+  removed.dailyHits = countOf("short_link_daily_hits");
+  removed.hitTotals = countOf("short_link_hit_totals");
+
+  for (const table of SHORT_LINK_CHILD_TABLES) {
+    const stmt = db.prepare(`DELETE FROM ${table} WHERE short_link_id = ?`);
+    stmt.run([linkId]);
+    stmt.free();
+  }
+  const linkStmt = db.prepare("SELECT COUNT(*) AS n FROM short_links WHERE id = ?");
+  linkStmt.bind([linkId]);
+  removed.link = Math.max(0, Number(rowFromStmt(linkStmt)?.n || 0));
+  linkStmt.free();
+  const dropStmt = db.prepare("DELETE FROM short_links WHERE id = ?");
+  dropStmt.run([linkId]);
+  dropStmt.free();
+  return removed;
+}
+
+/** Поставить надгробие. Дата только вперёд: старая выгрузка не «оживляет» ссылку. */
+function markShortLinkDeleted(db, linkId, deletedAt, deletedBy = "") {
+  const stmt = db.prepare(`
+    INSERT INTO deleted_short_links (id, deleted_at, deleted_by)
+    VALUES (?, ?, ?)
+    ON CONFLICT (id) DO UPDATE SET
+      deleted_at = MAX(deleted_short_links.deleted_at, excluded.deleted_at),
+      deleted_by = excluded.deleted_by
+  `);
+  stmt.run([linkId, deletedAt, normalizeUsername(deletedBy)]);
+  stmt.free();
+}
+
+async function deleteShortLinkRow(id, options = {}) {
+  const linkId = String(id || "").trim();
+  if (!linkId) throw new Error("invalid short link id");
+  const db = await getDb();
+  db.run("BEGIN");
+  let removed = null;
+  try {
+    removed = purgeShortLinkRows(db, linkId);
+    // Надгробие: без него удаление не доезжает до второй панели, а оттуда
+    // ссылка возвращается назад при следующей синхронизации.
+    if (options?.tombstone !== false) {
+      markShortLinkDeleted(db, linkId, sanitizeIso(options?.deletedAt), options?.deletedBy);
+    }
+    db.run("COMMIT");
+  } catch (e) {
+    db.run("ROLLBACK");
+    throw e;
+  }
+  saveDb(db);
+  return removed;
 }
 
 function getSubscriptionFeedRowByKey(db, feedKey) {
@@ -2056,6 +2513,7 @@ function toPublicSyncPeer(row) {
     enabled: Number(row?.enabled || 0) > 0,
     intervalMinutes: Math.max(0, Number(row?.interval_minutes || 0)),
     includeProfiles: Number(row?.include_profiles || 0) > 0,
+    pushEnabled: Number(row?.push_enabled || 0) > 0,
     lastStatus: String(row?.last_status || ""),
     lastError: String(row?.last_error || ""),
     lastReport,
@@ -2109,6 +2567,11 @@ function normalizeSyncPeerInput(input, previous = null) {
     includeProfiles: input?.includeProfiles === undefined
       ? (previous ? previous.includeProfiles : true)
       : Boolean(input.includeProfiles),
+    // Досылка недостающего на ту сторону. По умолчанию включена: без неё
+    // панели расходятся, и на удалённой не появится ничего нового.
+    pushEnabled: input?.pushEnabled === undefined
+      ? (previous ? previous.pushEnabled : true)
+      : Boolean(input.pushEnabled),
   };
 }
 
@@ -2119,8 +2582,8 @@ async function createSyncPeer(input) {
   const id = crypto.randomUUID();
   const now = nowIso();
   const stmt = db.prepare(`
-    INSERT INTO sync_peers (id, label, remote_url, remote_token, enabled, interval_minutes, include_profiles, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sync_peers (id, label, remote_url, remote_token, enabled, interval_minutes, include_profiles, push_enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   stmt.run([
     id,
@@ -2130,6 +2593,7 @@ async function createSyncPeer(input) {
     next.enabled ? 1 : 0,
     next.intervalMinutes,
     next.includeProfiles ? 1 : 0,
+    next.pushEnabled ? 1 : 0,
     now,
     now,
   ]);
@@ -2146,7 +2610,8 @@ async function updateSyncPeer(id, patch) {
   if (!next.remoteToken) throw new Error("remoteToken is required");
   const stmt = db.prepare(`
     UPDATE sync_peers
-    SET label = ?, remote_url = ?, remote_token = ?, enabled = ?, interval_minutes = ?, include_profiles = ?, updated_at = ?
+    SET label = ?, remote_url = ?, remote_token = ?, enabled = ?, interval_minutes = ?,
+        include_profiles = ?, push_enabled = ?, updated_at = ?
     WHERE id = ?
   `);
   stmt.run([
@@ -2156,6 +2621,7 @@ async function updateSyncPeer(id, patch) {
     next.enabled ? 1 : 0,
     next.intervalMinutes,
     next.includeProfiles ? 1 : 0,
+    next.pushEnabled ? 1 : 0,
     nowIso(),
     previous.id,
   ]);
@@ -2198,6 +2664,9 @@ async function recordSyncPeerRun(id, { status, error = "", report = null, synced
 }
 
 async function exportSyncBundle(options = {}) {
+  // До запросов: на старой базе этот вызов ещё и переносит накопленные
+  // счётчики на текущую установку, иначе они уехали бы с пустым origin.
+  const installationId = await getInstallationId();
   const db = await getDb();
   const includeProfiles = options?.profiles !== false;
   const users = allRows(db, `
@@ -2319,6 +2788,52 @@ async function exportSyncBundle(options = {}) {
     updatedAt: String(row.updated_at || ""),
   }));
 
+  // Счётчики уезжают с пометкой установки: принимающая сторона по ней отличит
+  // наши просмотры от своих и не сложит одно и то же дважды.
+  const dailyHits = allRows(db, `
+    SELECT short_link_id, day, origin, hits
+    FROM short_link_daily_hits
+    WHERE hits > 0
+    ORDER BY day DESC, short_link_id ASC
+  `).map((row) => ({
+    shortLinkId: String(row.short_link_id || ""),
+    day: String(row.day || ""),
+    origin: String(row.origin || ""),
+    hits: Math.max(0, Number(row.hits || 0)),
+  }));
+
+  const hitTotals = allRows(db, `
+    SELECT short_link_id, origin, hits, updated_at
+    FROM short_link_hit_totals
+    WHERE hits > 0
+    ORDER BY short_link_id ASC, origin ASC
+  `).map((row) => ({
+    shortLinkId: String(row.short_link_id || ""),
+    origin: String(row.origin || ""),
+    hits: Math.max(0, Number(row.hits || 0)),
+    updatedAt: String(row.updated_at || ""),
+  }));
+
+  // Составы объединений лежат файлами, а не в базе, поэтому их надо собрать
+  // отдельно — иначе на принимающей панели ссылка merge:<id> ведёт в никуда.
+  const mergedSources = listMergedSources();
+
+  const health = allRows(db, `
+    SELECT * FROM short_link_health ORDER BY checked_at DESC
+  `).map(toPublicHealth);
+
+  // Надгробия едут вместе с данными: принимающая сторона по ним удаляет у себя
+  // то, что удалили у нас, и не присылает это обратно.
+  const deletedShortLinks = allRows(db, `
+    SELECT id, deleted_at, deleted_by
+    FROM deleted_short_links
+    ORDER BY deleted_at DESC
+  `).map((row) => ({
+    id: String(row.id || ""),
+    deletedAt: String(row.deleted_at || ""),
+    deletedBy: normalizeUsername(row.deleted_by),
+  }));
+
   const profileRows = allRows(db, `
     SELECT name, owner_username, created_at, updated_at
     FROM profile_files
@@ -2351,8 +2866,14 @@ async function exportSyncBundle(options = {}) {
   return {
     version: 1,
     exportedAt: nowIso(),
+    installationId,
     data: {
       users,
+      dailyHits,
+      hitTotals,
+      health,
+      mergedSources,
+      deletedShortLinks,
       shortLinks,
       access,
       favorites,
@@ -2396,6 +2917,7 @@ function upsertSyncProfileFile(db, item, counters) {
 }
 
 async function importSyncBundle(bundle, options = {}) {
+  const localOrigin = await getInstallationId();
   const db = await getDb();
   const data = bundle?.data && typeof bundle.data === "object" ? bundle.data : bundle;
   if (!data || typeof data !== "object") throw new Error("invalid sync bundle");
@@ -2408,17 +2930,48 @@ async function importSyncBundle(bundle, options = {}) {
     userHistory: 0,
     subscriptionOverrides: 0,
     profileFiles: 0,
+    hitCounters: 0,
+    deletedShortLinks: 0,
+    health: 0,
+    mergedSources: 0,
   };
   const dryRun = Boolean(options?.dryRun);
   if (dryRun) return counters;
 
   db.run("BEGIN");
   try {
+    // Надгробия разбираем первыми: пришедшее удаление должно сработать до
+    // того, как та же ссылка попробует приехать обратно из списка выгрузки.
+    const tombstones = new Map();
+    for (const row of allRows(db, "SELECT id, deleted_at FROM deleted_short_links")) {
+      tombstones.set(String(row.id || ""), String(row.deleted_at || ""));
+    }
+    for (const item of Array.isArray(data.deletedShortLinks) ? data.deletedShortLinks : []) {
+      const id = String(item?.id || "").trim();
+      if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) continue;
+      const deletedAt = sanitizeIso(item?.deletedAt ?? item?.deleted_at);
+      const existing = getShortLinkRowSync(db, id);
+      // Ссылку могли завести заново уже после удаления — тогда надгробие
+      // устарело, и трогать её нельзя.
+      if (existing && String(existing.updated_at || "") > deletedAt) continue;
+      if (existing) {
+        purgeShortLinkRows(db, id);
+        counters.deletedShortLinks += 1;
+      }
+      markShortLinkDeleted(db, id, deletedAt, item?.deletedBy ?? item?.deleted_by);
+      const known = tombstones.get(id) || "";
+      if (deletedAt > known) tombstones.set(id, deletedAt);
+    }
+
     for (const item of Array.isArray(data.shortLinks) ? data.shortLinks : []) {
       const id = String(item?.id || "").trim();
       if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) continue;
       const createdAt = sanitizeIso(item?.createdAt ?? item?.created_at);
       const updatedAt = sanitizeIso(item?.updatedAt ?? item?.updated_at, createdAt);
+      // Удалённое не воскрешаем: на той стороне выгрузку могли собрать раньше,
+      // чем до неё доехало наше удаление.
+      const tombstone = tombstones.get(id) || "";
+      if (tombstone && tombstone >= updatedAt) continue;
       const stmt = db.prepare(`
         INSERT INTO short_links (id, params_json, title, owner_username, hidden, tags_json, created_at, updated_at, hits)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2428,8 +2981,7 @@ async function importSyncBundle(bundle, options = {}) {
           owner_username = excluded.owner_username,
           hidden = excluded.hidden,
           tags_json = excluded.tags_json,
-          updated_at = excluded.updated_at,
-          hits = MAX(short_links.hits, excluded.hits)
+          updated_at = excluded.updated_at
         WHERE excluded.updated_at >= short_links.updated_at
       `);
       stmt.run([
@@ -2441,7 +2993,9 @@ async function importSyncBundle(bundle, options = {}) {
         safeJsonStringify(Array.isArray(item?.tags) ? item.tags.map((x) => String(x || "").trim()).filter(Boolean) : [], "[]"),
         createdAt,
         updatedAt,
-        Math.max(0, Number(item?.hits || 0)),
+        // hits в этой строке — счётчик конкретной установки. Чужой сюда не
+        // кладём: общая сумма считается по short_link_hit_totals.
+        0,
       ]);
       stmt.free();
       counters.shortLinks += 1;
@@ -2648,12 +3202,109 @@ async function importSyncBundle(bundle, options = {}) {
       upsertSyncProfileFile(db, item, counters);
     }
 
+    // Счётчики просмотров. Свои строки не трогаем вовсе: удалённая панель
+    // знает о них только то, что когда-то у нас забрала, и её копия всегда не
+    // свежее нашей. Чужие берём по максимуму — счётчик только растёт, поэтому
+    // повторный обмен теми же данными ничего не испортит.
+    const dailyStmt = db.prepare(`
+      INSERT INTO short_link_daily_hits (short_link_id, day, origin, hits)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (short_link_id, day, origin) DO UPDATE SET
+        hits = MAX(short_link_daily_hits.hits, excluded.hits)
+    `);
+    for (const item of Array.isArray(data.dailyHits) ? data.dailyHits : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      const day = String(item?.day || "").trim();
+      const origin = String(item?.origin || "").trim();
+      if (!shortLinkId || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !origin || origin === localOrigin) continue;
+      dailyStmt.run([shortLinkId, day, origin, Math.max(0, Number(item?.hits || 0))]);
+      counters.hitCounters += 1;
+    }
+    dailyStmt.free();
+
+    const totalStmt = db.prepare(`
+      INSERT INTO short_link_hit_totals (short_link_id, origin, hits, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT (short_link_id, origin) DO UPDATE SET
+        hits = MAX(short_link_hit_totals.hits, excluded.hits),
+        updated_at = excluded.updated_at
+    `);
+    for (const item of Array.isArray(data.hitTotals) ? data.hitTotals : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      const origin = String(item?.origin || "").trim();
+      if (!shortLinkId || !origin || origin === localOrigin) continue;
+      totalStmt.run([
+        shortLinkId,
+        origin,
+        Math.max(0, Number(item?.hits || 0)),
+        sanitizeIso(item?.updatedAt ?? item?.updated_at),
+      ]);
+      counters.hitCounters += 1;
+    }
+    totalStmt.free();
+
+    // Проверки подписок: берём свежую, откуда бы она ни приехала. Ходить к
+    // провайдеру дважды с двух панелей незачем, ответ будет тот же.
+    const healthStmt = db.prepare(`
+      INSERT INTO short_link_health (
+        short_link_id, checked_at, ok, unreachable, status, error, servers,
+        upload, download, total, expire_at, support_url, web_page_url, provider_title
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (short_link_id) DO UPDATE SET
+        checked_at = excluded.checked_at,
+        ok = excluded.ok,
+        unreachable = excluded.unreachable,
+        status = excluded.status,
+        error = excluded.error,
+        servers = excluded.servers,
+        upload = excluded.upload,
+        download = excluded.download,
+        total = excluded.total,
+        expire_at = excluded.expire_at,
+        support_url = excluded.support_url,
+        web_page_url = excluded.web_page_url,
+        provider_title = excluded.provider_title
+      WHERE excluded.checked_at > short_link_health.checked_at
+    `);
+    for (const item of Array.isArray(data.health) ? data.health : []) {
+      const shortLinkId = String(item?.shortLinkId ?? item?.short_link_id ?? "").trim();
+      if (!shortLinkId || tombstones.has(shortLinkId)) continue;
+      healthStmt.run([
+        shortLinkId,
+        sanitizeIso(item?.checkedAt ?? item?.checked_at),
+        item?.ok ? 1 : 0,
+        item?.unreachable ? 1 : 0,
+        Math.max(0, Number(item?.status || 0)),
+        String(item?.error || "").slice(0, 400),
+        Math.max(0, Number(item?.servers || 0)),
+        Math.max(0, Number(item?.upload || 0)),
+        Math.max(0, Number(item?.download || 0)),
+        Math.max(0, Number(item?.total || 0)),
+        Math.max(0, Number(item?.expireAt ?? item?.expire_at ?? 0)),
+        String(item?.supportUrl ?? item?.support_url ?? "").slice(0, 500),
+        String(item?.webPageUrl ?? item?.web_page_url ?? "").slice(0, 500),
+        String(item?.providerTitle ?? item?.provider_title ?? "").slice(0, 200),
+      ]);
+      counters.health += 1;
+    }
+    healthStmt.free();
+
     db.run("COMMIT");
   } catch (e) {
     db.run("ROLLBACK");
     throw e;
   }
   saveDb(db);
+
+  // Объединения — файлы на диске, поэтому пишем их вне транзакции базы.
+  for (const item of Array.isArray(data.mergedSources) ? data.mergedSources : []) {
+    try {
+      if (importMergedSource(item)) counters.mergedSources += 1;
+    } catch {
+      // Один кривой состав не должен валить весь импорт.
+    }
+  }
   return counters;
 }
 
@@ -2727,6 +3378,9 @@ async function collectUsageStats(actor, options = {}) {
   const username = normalizeUsername(actor?.username);
   if (!username) return emptyUsageStats(days);
 
+  // Дёргаем идентификатор установки до запросов: на старой базе это ещё и
+  // перенос накопленных счётчиков на текущую установку.
+  await getInstallationId();
   const db = await getDb();
   const isAdmin = role === "admin";
   const linkRows = isAdmin
@@ -2757,7 +3411,10 @@ async function collectUsageStats(actor, options = {}) {
 
   stats.totals.subscriptions = linkRows.length;
   stats.totals.hiddenSubscriptions = linkRows.filter((row) => Number(row.hidden || 0) > 0).length;
-  stats.totals.hits = linkRows.reduce((sum, row) => sum + Math.max(0, Number(row.hits || 0)), 0);
+  // Просмотры считаем по установкам и складываем: одна и та же ссылка живёт на
+  // нескольких панелях, и у каждой свой счётчик.
+  const totalHitsByLink = hitTotalsFor(db, ids);
+  stats.totals.hits = ids.reduce((sum, id) => sum + (totalHitsByLink.get(id) || 0), 0);
 
   const dailyRows = allRows(db, `
     SELECT day, SUM(hits) AS hits
@@ -2774,9 +3431,55 @@ async function collectUsageStats(actor, options = {}) {
     WHERE short_link_id IN (${inList})
   `, ids);
 
-  const newByDay = new Map();
+  /**
+   * Устройства считаем по hwid, а не по строкам.
+   *
+   * Строка в short_link_users — это пара «подписка + устройство». Один телефон
+   * на пяти подписках давал пять «устройств» и пять «новых» в день, когда его
+   * подключили к очередной. Сводим такие строки в одно устройство: самая
+   * ранняя дата знакомства, самая поздняя активность, свежие ОС и приложение.
+   */
+  const byHwid = new Map();
   for (const row of deviceRows) {
-    const day = String(row.first_seen_at || "").slice(0, 10);
+    const hwid = String(row.hwid || "").trim();
+    if (!hwid) continue;
+    const seenAt = String(row.last_seen_at || "");
+    const firstAt = String(row.first_seen_at || "");
+    const current = byHwid.get(hwid);
+    if (!current) {
+      byHwid.set(hwid, {
+        hwid,
+        firstSeenAt: firstAt,
+        lastSeenAt: seenAt,
+        blocked: Number(row.blocked || 0) > 0,
+        last_device_os: String(row.last_device_os || ""),
+        last_app: String(row.last_app || ""),
+        last_device_model: String(row.last_device_model || ""),
+        shortLinkId: String(row.short_link_id || ""),
+        links: 1,
+      });
+      continue;
+    }
+    if (firstAt && (!current.firstSeenAt || firstAt < current.firstSeenAt)) current.firstSeenAt = firstAt;
+    // Заблокированным считаем устройство, которому закрыли хотя бы одну
+    // подписку: в списке оно должно попадаться на глаза.
+    if (Number(row.blocked || 0) > 0) current.blocked = true;
+    current.links += 1;
+    if (seenAt && seenAt > current.lastSeenAt) {
+      // Приложение и ОС берём из самого свежего захода: устройство одно, а
+      // подключаться с него могли откуда угодно.
+      current.lastSeenAt = seenAt;
+      current.last_device_os = String(row.last_device_os || "");
+      current.last_app = String(row.last_app || "");
+      current.last_device_model = String(row.last_device_model || "");
+      current.shortLinkId = String(row.short_link_id || "");
+    }
+  }
+  const devices = [...byHwid.values()];
+
+  const newByDay = new Map();
+  for (const device of devices) {
+    const day = String(device.firstSeenAt || "").slice(0, 10);
     if (!day || day < periodStart) continue;
     newByDay.set(day, (newByDay.get(day) || 0) + 1);
   }
@@ -2790,17 +3493,17 @@ async function collectUsageStats(actor, options = {}) {
   stats.totals.newDevicesPeriod = stats.daily.reduce((sum, item) => sum + item.newDevices, 0);
 
   const lastSeenMs = (row) => {
-    const ts = Date.parse(String(row?.last_seen_at || ""));
+    const ts = Date.parse(String(row?.lastSeenAt ?? row?.last_seen_at ?? ""));
     return Number.isFinite(ts) ? ts : 0;
   };
-  stats.totals.devices = deviceRows.length;
-  stats.totals.blockedDevices = deviceRows.filter((row) => Number(row.blocked || 0) > 0).length;
-  stats.totals.activeDevices24h = deviceRows.filter((row) => now - lastSeenMs(row) <= 86400000).length;
-  stats.totals.activeDevices7d = deviceRows.filter((row) => now - lastSeenMs(row) <= 7 * 86400000).length;
-  stats.totals.activeDevices30d = deviceRows.filter((row) => now - lastSeenMs(row) <= 30 * 86400000).length;
+  stats.totals.devices = devices.length;
+  stats.totals.blockedDevices = devices.filter((device) => device.blocked).length;
+  stats.totals.activeDevices24h = devices.filter((device) => now - lastSeenMs(device) <= 86400000).length;
+  stats.totals.activeDevices7d = devices.filter((device) => now - lastSeenMs(device) <= 7 * 86400000).length;
+  stats.totals.activeDevices30d = devices.filter((device) => now - lastSeenMs(device) <= 30 * 86400000).length;
 
-  stats.byOs = countByKey(deviceRows, "last_device_os", "не определена").slice(0, 8);
-  stats.byApp = countByKey(deviceRows, "last_app", "не определено").slice(0, 8);
+  stats.byOs = countByKey(devices, "last_device_os", "не определена").slice(0, 8);
+  stats.byApp = countByKey(devices, "last_app", "не определено").slice(0, 8);
 
   const perLink = new Map(ids.map((id) => [id, { devices: 0, lastSeenAt: "" }]));
   for (const row of deviceRows) {
@@ -2828,7 +3531,7 @@ async function collectUsageStats(actor, options = {}) {
       return {
         id,
         title: titleById.get(id) || id,
-        hits: Math.max(0, Number(row.hits || 0)),
+        hits: totalHitsByLink.get(id) || 0,
         hitsPeriod: periodHitsByLink.get(id) || 0,
         devices: bucket.devices,
         lastSeenAt: bucket.lastSeenAt,
@@ -2837,20 +3540,24 @@ async function collectUsageStats(actor, options = {}) {
     .sort((a, b) => b.hitsPeriod - a.hitsPeriod || b.hits - a.hits || b.devices - a.devices)
     .slice(0, 8);
 
-  stats.recentDevices = deviceRows
+  // Список последних — тоже по устройствам: один телефон занимал в нём
+  // столько строк, на скольких подписках сидел, и вытеснял остальные.
+  stats.recentDevices = devices
     .slice()
     .sort((a, b) => lastSeenMs(b) - lastSeenMs(a))
     .slice(0, 12)
-    .map((row) => ({
-      hwid: String(row.hwid || ""),
-      shortLinkId: String(row.short_link_id || ""),
-      title: titleById.get(String(row.short_link_id || "")) || String(row.short_link_id || ""),
-      os: String(row.last_device_os || ""),
-      app: String(row.last_app || ""),
-      deviceModel: String(row.last_device_model || ""),
-      blocked: Number(row.blocked || 0) > 0,
-      firstSeenAt: String(row.first_seen_at || ""),
-      lastSeenAt: String(row.last_seen_at || ""),
+    .map((device) => ({
+      hwid: device.hwid,
+      shortLinkId: device.shortLinkId,
+      title: titleById.get(device.shortLinkId) || device.shortLinkId,
+      os: device.last_device_os,
+      app: device.last_app,
+      deviceModel: device.last_device_model,
+      blocked: device.blocked,
+      firstSeenAt: device.firstSeenAt,
+      lastSeenAt: device.lastSeenAt,
+      // На скольких подписках видели это устройство.
+      links: device.links,
     }));
 
   return stats;
@@ -2882,9 +3589,17 @@ export {
   setFavoritesRow,
   recordShortLinkUserVisit,
   listShortLinkUsers,
+  listShortLinkUserCounts,
   collectUsageStats,
   updateShortLinkUserPolicy,
   setShortLinkUserBlocked,
+  deleteShortLinkRow,
+  upsertShortLinkHealth,
+  getShortLinkHealth,
+  listShortLinkHealthFor,
+  listShortLinksDueForHealthCheck,
+  getShortLinkTombstone,
+  forgetShortLinkTombstone,
   deleteShortLinkUser,
   listProfileFileRecords,
   getProfileFileRecord,
@@ -2909,6 +3624,7 @@ export {
   updateSyncPeer,
   deleteSyncPeer,
   recordSyncPeerRun,
+  getInstallationId,
   exportSyncBundle,
   importSyncBundle,
 };

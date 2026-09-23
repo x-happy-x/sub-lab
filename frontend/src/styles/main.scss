@@ -575,7 +575,9 @@ a,
 .page {
   width: min(1200px, 100%);
   margin: 0 auto;
-  padding: clamp(20px, 3vw, 34px) clamp(16px, 3vw, 32px) calc(64px + env(safe-area-inset-bottom));
+  /* Снизу запас побольше: у карточек последнего ряда меню раскрывается вниз,
+     и ему нужно куда-то лечь. */
+  padding: clamp(20px, 3vw, 34px) clamp(16px, 3vw, 32px) calc(120px + env(safe-area-inset-bottom));
   animation: sl-fade 0.24s var(--ease) both;
 }
 
@@ -3631,19 +3633,19 @@ textarea,
   font-weight: 700;
 }
 
-/* Чужая подписка: карточка узнаётся по цветной кромке, а не только по бейджу. */
+/**
+ * Чужая подписка: обводка по всей карточке.
+ *
+ * Цвет акцентный, тот же что у ссылок и кнопок — это пометка «не ваше», а не
+ * ошибка. Наведение обычную карточку подсвечивает как раз акцентом, поэтому у
+ * чужой на hover берём оттенок поплотнее: иначе обводка на ней бледнела бы.
+ */
 .sub-card-foreign {
-  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
 }
 
-.sub-card-foreign::before {
-  content: "";
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  border-radius: var(--r-xl) 0 0 var(--r-xl);
-  background: color-mix(in srgb, var(--accent) 60%, transparent);
-  pointer-events: none;
+.sub-card-foreign:hover {
+  border-color: color-mix(in srgb, var(--accent) 88%, var(--line));
 }
 
 /* =========================================================================
@@ -3710,4 +3712,412 @@ textarea,
   font-size: var(--fs-xs);
   line-height: 1.5;
   color: var(--muted);
+}
+
+/* =========================================================================
+   Карточка подписки: ссылка с копированием и меню действий
+   ========================================================================= */
+
+.sub-url {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.sub-url a {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Копирование живёт в конце самой ссылки, а не в общем ряду иконок: так его
+   не приходится искать среди остальных действий. */
+.sub-url-copy {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--muted-soft);
+  cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+
+.sub-url-copy:hover {
+  color: var(--accent);
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.sub-url-copy:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.card-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+/**
+ * Карточка с открытым меню поднимается над соседями.
+ *
+ * `.cards > *` несёт анимацию появления с `both`, а элемент с залипшей
+ * анимацией — собственный контекст наложения. Поэтому z-index выпадающего
+ * меню действует только внутри своей карточки, и следующая карточка,
+ * идущая по документу позже, закрывала его собой.
+ */
+.sub-card.is-menu-open {
+  z-index: 40;
+}
+
+/* Раскрывается вправо от кнопки: она стоит в начале ряда действий, и 216 px
+   меню укладываются в ширину карточки, не вылезая ни за неё, ни за экран. */
+.card-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 340;
+  min-width: 216px;
+  max-width: min(260px, calc(100vw - 32px));
+  display: grid;
+  gap: 2px;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--sh-3);
+  animation: sl-pop 0.14s var(--ease) both;
+}
+
+.card-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.card-dropdown-item:hover {
+  background: var(--surface-3);
+}
+
+.card-dropdown-item:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.card-dropdown-item.is-danger {
+  color: var(--danger);
+}
+
+.card-dropdown-item.is-danger:hover {
+  background: var(--danger-tint);
+}
+
+.delete-warning {
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+  background: var(--danger-tint);
+  color: var(--ink);
+}
+
+/* =========================================================================
+   Строка состояния подписки
+   ========================================================================= */
+
+/* Строка одна и не переносится: длинная причина обрезается многоточием, а
+   целиком текст остаётся в подсказке. */
+.sub-health {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: nowrap;
+  /* Подтягиваем к адресу: это про ту же подписку, а не отдельный блок. */
+  margin-top: calc(var(--sp-2) * -1);
+  font-size: var(--fs-2xs);
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: nowrap;
+  /* Без этого flex-элемент внутри grid-ячейки отказывается сжиматься и длинная
+     причина вылезает за карточку вместо многоточия. */
+  min-width: 0;
+}
+
+.sub-health-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sub-health-renew {
+  flex: 0 0 auto;
+}
+
+/* Заголовок карточки подписки и отметка о проверке — на одной линии. */
+.sub-card > .card-head {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
+.sub-card > .card-head .card-actions {
+  flex: 0 0 auto;
+}
+
+/**
+ * Шапка карточки справа: когда проверяли и две цифры без подписей.
+ *
+ * Зелёная — сколько устройств пользуется подпиской, красная — сколько
+ * заблокировано или оказалось сверх лимита. Разделены чертой, чтобы не
+ * слипались в одно число; что есть что, объясняет подсказка.
+ */
+.sub-checked {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-2xs);
+  color: var(--muted-soft);
+  white-space: nowrap;
+}
+
+.sub-checked > * + *::before {
+  content: "|";
+  margin-right: var(--sp-3);
+  color: var(--line-strong);
+}
+
+.sub-checked-users {
+  color: var(--ok);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-checked-trouble {
+  color: var(--danger);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-health-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted-soft);
+}
+
+.sub-health-dot.is-ok { background: var(--ok); }
+.sub-health-dot.is-warn { background: var(--warn); }
+.sub-health-dot.is-danger,
+.sub-health-dot.is-dead { background: var(--danger); }
+
+.sub-health-dead .sub-health-text { color: var(--danger); }
+.sub-health-warn .sub-health-text { color: var(--warn); }
+
+.sub-health-renew {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.sub-health-renew:hover {
+  border-bottom-color: var(--accent);
+}
+
+
+
+/* =========================================================================
+   Список серверов
+   ========================================================================= */
+
+.server-list {
+  display: grid;
+  gap: var(--sp-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.server-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  min-width: 0;
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.server-row-button {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.server-row.is-clickable {
+  padding: 0;
+}
+
+.server-row.is-clickable > .server-row-button {
+  padding: var(--sp-4) var(--sp-5);
+  border-radius: var(--r-md);
+}
+
+.server-row.is-clickable:hover {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+
+.server-row.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: var(--accent-tint);
+}
+
+/* Не прошёл отбор регуляркой: виден, но приглушён. */
+.server-row.is-muted {
+  opacity: 0.45;
+}
+
+.server-row.is-dead {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+}
+
+/* Плашка с флагом: держит левый край списка ровным независимо от имён. */
+.server-row-mark {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  overflow: visible;
+}
+
+.server-row-flag {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.server-row-letter {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* Пометка «белого» сервера — в углу плашки, чтобы её было видно при
+   пролистывании длинного списка, а не только при чтении имени. */
+.server-row-bypass {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 2px solid var(--surface-2);
+  background: var(--ok);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.server-row-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.server-row-name {
+  font-weight: 700;
+  font-size: var(--fs-md);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-row-tags {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.server-tag {
+  padding: 2px 7px;
+  border-radius: var(--r-xs);
+  background: var(--accent-tint-strong);
+  color: var(--accent-strong);
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.server-row-meta,
+.server-row-sub {
+  font-size: var(--fs-2xs);
+  color: var(--muted-soft);
+  letter-spacing: 0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-row-trailing {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-left: auto;
+}
+
+:root[data-theme="claude-dark"] .server-tag {
+  color: var(--accent);
+}
+
+/* Длинные списки серверов прокручиваются внутри себя, а не растягивают окно. */
+.share-server-list,
+.result-servers,
+.merge-names {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.bulk-import-item > .server-list {
+  gap: 0;
+}
+
+.bulk-import-item > .server-list .server-row {
+  padding: 0;
+  border: 0;
+  background: transparent;
 }

@@ -145,7 +145,10 @@ function normalizeItem(raw) {
   const deeplink = unquote(raw.deeplink || "");
   if (!deeplink) return null;
   const platforms = parsePlatforms(unquote(raw.platforms || ""));
-  const formats = parsePlatforms(unquote(raw.formats || "")).filter((x) => x === "raw" || x === "yml");
+  // json тоже допустимый формат: Xray-клиенты читают бандл конфигов, и без
+  // него авто-формат не мог его выбрать в принципе.
+  const formats = parsePlatforms(unquote(raw.formats || ""))
+    .filter((x) => x === "raw" || x === "yml" || x === "json");
   return { key, label, deeplink, platforms, formats: formats.length > 0 ? formats : ["raw", "yml"] };
 }
 

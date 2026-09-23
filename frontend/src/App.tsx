@@ -8,6 +8,8 @@ import type {
   ProfileCatalog,
   ProfileCatalogItem,
   ShortLinkAccessGrant,
+  ShortLinkHealth,
+  ShortLinkUserCounts,
   ShortLinkUsersData,
   SubscriptionPayload,
   SubTestResponse,
@@ -34,6 +36,10 @@ import {
   previewMergeItems,
   pingSubscription,
   decryptHappSubscription,
+  encryptHappSubscription,
+  deleteShortLink,
+  fetchShortLinkHealth,
+  checkShortLinkHealth as checkShortLinkHealthRemote,
   deleteProfile,
   fetchProfileCatalog,
   fetchAppsCatalog,
@@ -71,6 +77,7 @@ import { copyToClipboard } from "./lib/clipboard";
 import { FlaskIcon, ImportIcon, PlusIcon, ProfileIcon, CopyIcon, SaveIcon, SaveAsIcon, ThemeIcon, DiceIcon, TrashIcon, ListIcon, ShieldIcon, ChartIcon, TestIcon, CloseIcon } from "./icons";
 import { SubscriptionCard } from "./components/SubscriptionCard";
 import { SyncPeersPanel } from "./components/SyncPeersPanel";
+import { ServerList, ServerRow } from "./components/ServerRow";
 import { Modal } from "./components/Modal";
 import { AppShell, type ShellNavItem } from "./components/AppShell";
 import { UserMenu } from "./components/UserMenu";
@@ -167,6 +174,11 @@ const OUTPUT_OPTIONS = [
   { value: "raw", label: "raw", tip: "Формат RAW" },
   { value: "raw_base64", label: "raw (base64)", tip: "Формат RAW в base64" },
   { value: "json", label: "json", tip: "Формат JSON" },
+  {
+    value: "clash_provider",
+    label: "provider",
+    tip: "Файл для proxy-providers mihomo: только список прокси, без групп и правил. Полный конфиг в этой роли mihomo ругает, а группы из него всё равно выбрасывает.",
+  },
 ] as const;
 
 const NODES_MODE_OPTIONS = [
@@ -230,6 +242,29 @@ function toggleClashGroup(groups: ClashGroupDraft[], entry: typeof CLASH_GROUP_P
 
 function isEncryptedHappLink(value: string): boolean {
   return /^happ:\/\/crypt\d*\//i.test(String(value || "").trim());
+}
+
+/**
+ * Полезная нагрузка объединения.
+ *
+ * Приложение, устройство и профиль здесь пустые намеренно: у каждого источника
+ * внутри объединения они свои, а общие значения из конструктора только сбивали
+ * с толку — на карточке висели «flclashx» и «windows», к делу не относящиеся.
+ */
+function buildMergePayload(subUrl: string, output: SubscriptionPayload["output"], outputAuto: boolean): SubscriptionPayload {
+  return {
+    ...defaultPayload(),
+    app: "",
+    device: "",
+    sub_url: subUrl,
+    output,
+    output_auto: outputAuto ? "1" : "",
+  };
+}
+
+/** У объединения на карточке важен состав, а не формат. */
+function mergeLabels(count: number): string[] {
+  return [`merge:${count}`];
 }
 
 function labelsFromPayload(p: SubscriptionPayload): string[] {
@@ -568,10 +603,10 @@ export default function App() {
   const [favorites, setFavorites] = useState<FavoriteItem[]>(() => readFavorites());
   const [status, setStatus] = useState("");
   const [listQuery, setListQuery] = useState("");
-  // Владелец записи: «мои» — созданные вами, «выданные» — через доступ,
-  // «чужие» — админский обзор. Чужие по умолчанию спрятаны, иначе список
-  // администратора превращается в свалку всей установки.
-  const [listOwnerFilter, setListOwnerFilter] = useState<"visible" | "mine" | "shared" | "foreign" | "all">("visible");
+  // Владелец записи: «мои» — свои и выданные вам, «чужие» — админский обзор.
+  // Чужие по умолчанию спрятаны, иначе список администратора превращается в
+  // свалку всей установки.
+  const [listOwnerFilter, setListOwnerFilter] = useState<"mine" | "foreign" | "all">("mine");
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authenticated, setAuthenticated] = useState(true);
   const [authResolved, setAuthResolved] = useState(false);
@@ -696,6 +731,17 @@ export default function App() {
   const [pingAttempts, setPingAttempts] = useState(3);
   const [mergeId, setMergeId] = useState("");
   const [mergeOutputAuto, setMergeOutputAuto] = useState(true);
+  const [mergeShortId, setMergeShortId] = useState("");
+  const [mergeTags, setMergeTags] = useState("");
+  const [mergeHidden, setMergeHidden] = useState(false);
+  const [happLink, setHappLink] = useState<{ title: string; url: string; link: string } | null>(null);
+  const [happLinkLoading, setHappLinkLoading] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ index: number; item: FavoriteItem } | null>(null);
+  const [deleteAlsoLink, setDeleteAlsoLink] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [healthById, setHealthById] = useState<Record<string, ShortLinkHealth>>({});
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [userCountsById, setUserCountsById] = useState<Record<string, ShortLinkUserCounts>>({});
   const [mergeItems, setMergeItems] = useState<MergeDraftItem[]>([]);
   const [mergePreview, setMergePreview] = useState<Record<string, MergePreviewResult>>({});
   const [mergePreviewLoading, setMergePreviewLoading] = useState(false);
@@ -733,6 +779,45 @@ export default function App() {
     const list = await fetchFavoritesRemote();
     setFavorites(list);
     writeFavorites(list);
+  };
+
+  /**
+   * Проверки подписок грузятся отдельно от списка.
+   *
+   * Их собирает суточный обход на сервере, здесь мы только забираем готовое —
+   * но запрос всё равно не должен задерживать отрисовку карточек.
+   */
+  useEffect(() => {
+    if (!authResolved) return;
+    if (authEnabled && !authenticated) return;
+    let cancelled = false;
+    setHealthLoading(true);
+    void fetchShortLinkHealth()
+      .then(({ health, users }) => {
+        if (cancelled) return;
+        const next: Record<string, ShortLinkHealth> = {};
+        for (const row of health) if (row.shortLinkId) next[row.shortLinkId] = row;
+        setHealthById(next);
+        const counts: Record<string, ShortLinkUserCounts> = {};
+        for (const row of users) if (row.shortLinkId) counts[row.shortLinkId] = row;
+        setUserCountsById(counts);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setHealthLoading(false); });
+    return () => { cancelled = true; };
+  }, [authResolved, authEnabled, authenticated]);
+
+  const recheckHealth = async (item: FavoriteItem) => {
+    if (!item.shortId) return;
+    try {
+      const row = await checkShortLinkHealthRemote(item.shortId);
+      setHealthById((prev) => ({ ...prev, [row.shortLinkId]: row }));
+      notify(row.ok ? "success" : "warning", row.ok
+        ? `${item.title}: работает, серверов ${row.servers}`
+        : `${item.title}: ${row.error || "не отвечает"}`);
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось проверить подписку");
+    }
   };
 
   useEffect(() => {
@@ -1346,14 +1431,53 @@ export default function App() {
     await hydrateComposerSource(nextPayload);
   };
 
+  /**
+   * Спросить перед удалением.
+   *
+   * Раньше корзина срабатывала сразу, и промах по соседней иконке стоил
+   * подписки. Само удаление — в `confirmDelete`.
+   */
   const onDelete = (idx: number) => {
-    if (favorites[idx]?.permissions?.canEdit === false) {
+    const item = favorites[idx];
+    if (!item) return;
+    if (item.permissions?.canEdit === false) {
       notify("warning", "Эту подписку нельзя удалять");
       return;
     }
-    const next = favorites.filter((_, i) => i !== idx);
-    saveFavorites(next);
-    notify("info", "Подписка удалена");
+    setDeleteAlsoLink(false);
+    setDeleteTarget({ index: idx, item });
+  };
+
+  /**
+   * Удаление после подтверждения.
+   *
+   * Своя подписка по умолчанию просто уходит из списка — короткая ссылка
+   * продолжает работать у тех, кому её выдали. Чужую (админский обзор) из
+   * списка убрать нельзя, её там нет: для неё единственный смысл удаления —
+   * снести саму ссылку.
+   */
+  const confirmDelete = async () => {
+    const target = deleteTarget;
+    if (!target || deleteBusy) return;
+    const { item, index } = target;
+    const dropLink = Boolean(item.foreign) || (deleteAlsoLink && Boolean(item.shortId));
+    setDeleteBusy(true);
+    try {
+      if (dropLink && item.shortId) {
+        await deleteShortLink(item.shortId);
+      }
+      if (!item.derived) {
+        saveFavorites(favorites.filter((_, i) => i !== index));
+      } else {
+        await reloadFavorites();
+      }
+      setDeleteTarget(null);
+      notify("success", dropLink ? "Короткая ссылка удалена" : "Подписка убрана из списка");
+    } catch (e) {
+      notify("error", (e as Error)?.message || "Не удалось удалить подписку");
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   /** Короткая ссылка объединения: `merge:<id>` в параметрах подписки. */
@@ -1378,6 +1502,9 @@ export default function App() {
     setMergeName("Объединенная подписка");
     setMergeOutput("yml");
     setMergeOutputAuto(true);
+    setMergeShortId("");
+    setMergeTags("");
+    setMergeHidden(false);
     setMergeItems(buildFavoriteDrafts(mergeCandidates()));
     resetMergeDrafts();
     openModal("merge");
@@ -1400,6 +1527,9 @@ export default function App() {
     setMergeName(favorite.title);
     setMergeOutput((favorite.payload.output || "yml") as SubscriptionPayload["output"]);
     setMergeOutputAuto(Boolean(favorite.payload.output_auto));
+    setMergeShortId(favorite.shortId || "");
+    setMergeTags((favorite.tags || []).join(", "));
+    setMergeHidden(Boolean(favorite.hidden));
     const drafts = buildFavoriteDrafts(mergeCandidates());
     setMergeItems(drafts);
     openModal("merge");
@@ -1417,6 +1547,9 @@ export default function App() {
           selected: true,
           pattern: String(saved.filter?.pattern || ""),
           onEmpty: saved.filter?.onEmpty || "all",
+          // Режим узлов сохраняется у источника объединения и может отличаться
+          // от того, что стоит у самой подписки.
+          nodes: String(saved.nodes || draft.nodes || "collapse"),
         };
       }));
     } catch (e) {
@@ -1436,6 +1569,7 @@ export default function App() {
       out.push({
         ...defaultPayload(),
         ...sourcePayload,
+        nodes: (draft.nodes || "collapse") as SubscriptionPayload["nodes"],
         title: draft.title,
         shortId: draft.shortId,
         filter: { pattern: draft.pattern.trim(), onEmpty: draft.onEmpty },
@@ -1477,24 +1611,22 @@ export default function App() {
     setMergeSaving(true);
     try {
       const items = await buildMergeItems();
+      const tags = normalizeTagsInput(mergeTags);
       if (mergeId) {
         await updateMergedSource(mergeId, { name: title, items });
-        const mergedPayload: SubscriptionPayload = {
-          ...defaultPayload(),
-          sub_url: `merge:${mergeId}`,
-          output: mergeOutput,
-          output_auto: mergeOutputAuto ? "1" : "",
-        };
+        const mergedPayload = buildMergePayload(`merge:${mergeId}`, mergeOutput, mergeOutputAuto);
         const existing = favorites[mergeEditingIndex];
         if (existing?.shortId) {
-          await updateShortLink(existing.shortId, mergedPayload, title, { hidden: existing.hidden, tags: existing.tags });
+          await updateShortLink(existing.shortId, mergedPayload, title, { hidden: mergeHidden, tags });
         }
         saveFavorites(favorites.map((item, index) => (index === mergeEditingIndex
           ? {
             ...item,
             title,
             payload: mergedPayload,
-            labels: [...labelsFromPayload(mergedPayload), `merge:${items.length}`],
+            hidden: mergeHidden,
+            tags,
+            labels: mergeLabels(items.length),
             ts: Date.now(),
           }
           : item)));
@@ -1504,19 +1636,20 @@ export default function App() {
       }
 
       const merged = await createMergedSource({ name: title, items });
-      const mergedPayload: SubscriptionPayload = {
-        ...defaultPayload(),
-        sub_url: merged.subUrl,
-        output: mergeOutput,
-        output_auto: mergeOutputAuto ? "1" : "",
-      };
-      const created = await createShortLink(mergedPayload, title);
+      const mergedPayload = buildMergePayload(merged.subUrl, mergeOutput, mergeOutputAuto);
+      const created = await createShortLink(mergedPayload, title, {
+        id: mergeShortId.trim() || undefined,
+        hidden: mergeHidden,
+        tags,
+      });
       const next: FavoriteItem = {
         title,
         url: created.shortUrl,
         shortId: created.id,
+        hidden: created.hidden,
+        tags: created.tags,
         payload: mergedPayload,
-        labels: [...labelsFromPayload(mergedPayload), `merge:${items.length}`],
+        labels: mergeLabels(items.length),
         ts: Date.now(),
       };
       saveFavorites([next, ...favorites]);
@@ -1773,6 +1906,31 @@ export default function App() {
       setPingError((e as Error)?.message || "Не удалось опросить серверы");
     } finally {
       setPingLoading(false);
+    }
+  };
+
+  /**
+   * Зашифровать короткую ссылку в happ://crypt5/...
+   *
+   * Happ открывает такую ссылку сам, а адрес панели в ней не виден — это и
+   * есть привычный вид, в котором подписки раздают провайдеры.
+   */
+  const openHappLink = async (item: { title: string; url: string }) => {
+    const url = item.url;
+    if (!url) {
+      notify("warning", "У подписки нет короткой ссылки");
+      return;
+    }
+    setHappLinkLoading(true);
+    setHappLink({ title: item.title, url, link: "" });
+    try {
+      const link = await encryptHappSubscription(url);
+      setHappLink({ title: item.title, url, link });
+    } catch (e) {
+      setHappLink(null);
+      notify("error", (e as Error)?.message || "Не удалось собрать happ-ссылку");
+    } finally {
+      setHappLinkLoading(false);
     }
   };
 
@@ -2151,8 +2309,6 @@ export default function App() {
     const entries = all.filter(({ item }) => {
       if (listOwnerFilter === "all") return true;
       if (listOwnerFilter === "foreign") return Boolean(item.foreign);
-      if (listOwnerFilter === "shared") return Boolean(item.derived) && !item.foreign;
-      if (listOwnerFilter === "mine") return !item.derived;
       return !item.foreign;
     });
     const query = listQuery.trim().toLowerCase();
@@ -2486,11 +2642,15 @@ export default function App() {
         <div className="result-grid">
           <div className="result">
             <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
-            <select>{sourceServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
+            <ServerList className="result-servers">
+              {sourceServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
+            </ServerList>
           </div>
           <div className="result">
             <strong>После конвертации: {testResult?.conversion?.outputFormat || "-"}</strong>
-            <select>{convertedServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
+            <ServerList className="result-servers">
+              {convertedServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
+            </ServerList>
           </div>
         </div>
       </section>
@@ -2809,7 +2969,7 @@ export default function App() {
           <p>
             {favorites.length === 0
               ? "Здесь появятся ссылки для приложений"
-              : (listQuery.trim() || listOwnerFilter !== "visible"
+              : (listQuery.trim() || listOwnerFilter !== "mine"
                 ? `Показано ${visibleFavorites.length} из ${favorites.length}`
                 : `Всего подписок: ${visibleFavorites.length}`)}
           </p>
@@ -2819,9 +2979,7 @@ export default function App() {
             {isAdminUser && foreignFavoritesCount > 0 ? (
               <div className="list-filters" role="group" aria-label="Фильтр по владельцу">
                 {([
-                  ["visible", "Доступные мне", "Свои и выданные вам подписки"],
-                  ["mine", "Мои", "Только те, что вы создали сами"],
-                  ["shared", "Выданные мне", "Подписки, к которым вам дали доступ"],
+                  ["mine", "Мои", "Свои подписки и выданные вам"],
                   ["foreign", "Чужие", `Подписки других пользователей: ${foreignFavoritesCount}`],
                   ["all", "Все", "Весь список без разбора владельца"],
                 ] as const).map(([key, label, tip]) => (
@@ -2878,7 +3036,7 @@ export default function App() {
                 : "В этом фильтре подписок нет. Выберите другой набор или снимите фильтр."}
             </div>
             <div className="toolbar">
-              <TipButton tip="Сбросить поиск и фильтр" onClick={() => { setListQuery(""); setListOwnerFilter("visible"); }}>Сбросить фильтры</TipButton>
+              <TipButton tip="Сбросить поиск и фильтр" onClick={() => { setListQuery(""); setListOwnerFilter("mine"); }}>Сбросить фильтры</TipButton>
             </div>
           </article>
         ) : (
@@ -2895,6 +3053,11 @@ export default function App() {
               onOpenUsers={() => void openSubUsers(item)}
               onOpenAccess={isAdminUser ? () => openAccess(item) : undefined}
               onPing={() => openPing(item)}
+              onHappLink={showAdvanced && item.url ? () => void openHappLink(item) : undefined}
+              health={item.shortId ? healthById[item.shortId] : undefined}
+              users={item.shortId ? userCountsById[item.shortId] : undefined}
+              healthLoading={healthLoading}
+              onCheckHealth={item.shortId ? () => void recheckHealth(item) : undefined}
               onOpenOverrides={() => void openOverrides(item)}
             />
           ))
@@ -2986,8 +3149,13 @@ export default function App() {
           <div className="bulk-import-preview">
             {bulkImportFilteredItems.slice(0, 200).map((item) => (
               <article key={`${item.index}-${item.server}-${item.port}`} className="bulk-import-item">
-                <div className="bulk-import-title">{item.normalizedName}</div>
-                <div className="bulk-import-sub">{item.type} · {item.server}:{item.port} · {item.network} · {item.security}</div>
+                <ServerList>
+                  <ServerRow
+                    name={item.normalizedName}
+                    uri={item.normalizedUri || item.uri}
+                    sub={`${item.type} · ${item.server}:${item.port} · ${item.network || "tcp"} · ${item.security || "none"}`}
+                  />
+                </ServerList>
                 <div className="bulk-import-fields">
                   {item.uuid ? <span>uuid: {item.uuid}</span> : null}
                   {item.password ? <span>password: {item.password}</span> : null}
@@ -3022,6 +3190,105 @@ export default function App() {
         />
       ) : null}
 
+      {deleteTarget ? (
+        <Modal
+          onClose={() => { if (!deleteBusy) setDeleteTarget(null); }}
+          title={deleteTarget.item.foreign ? "Удалить чужую подписку?" : "Удалить подписку?"}
+          showCloseButton
+          footer={(
+            <>
+              <Button tone="danger" disabled={deleteBusy} onClick={() => void confirmDelete()}>
+                {deleteBusy ? "Удаляем..." : (deleteTarget.item.foreign || deleteAlsoLink ? "Удалить насовсем" : "Убрать из списка")}
+              </Button>
+              <Button icon={<CloseIcon className="btn-icon" />} disabled={deleteBusy} onClick={() => setDeleteTarget(null)}>
+                Отмена
+              </Button>
+            </>
+          )}
+        >
+          <div className="field">
+            <span className="field-label">Подписка</span>
+            <div className="status">
+              {deleteTarget.item.title}
+              {deleteTarget.item.ownerUsername ? ` · владелец ${deleteTarget.item.ownerUsername}` : ""}
+            </div>
+            <div className="composer-meta-hint">{deleteTarget.item.url}</div>
+          </div>
+
+          {deleteTarget.item.foreign ? (
+            <div className="composer-hint delete-warning">
+              Это подписка другого пользователя. Убрать её из своего списка нельзя — её там нет,
+              поэтому удаление снесёт саму короткую ссылку: адрес перестанет отвечать у всех,
+              кому его выдали, вместе с доступами, устройствами и счётчиками. Отменить нельзя.
+            </div>
+          ) : (
+            <>
+              <div className="composer-meta-hint">
+                По умолчанию подписка просто уходит из вашего списка. Короткая ссылка продолжит
+                работать у тех, кому вы её выдали.
+              </div>
+              {deleteTarget.item.shortId ? (
+                <label className="switch-row">
+                  <span className="switch-row-text">
+                    <span>Удалить и саму короткую ссылку</span>
+                    <small>Адрес перестанет отвечать у всех, вместе с доступами и статистикой. Отменить нельзя.</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={deleteAlsoLink}
+                    onChange={(e) => setDeleteAlsoLink(e.target.checked)}
+                  />
+                </label>
+              ) : null}
+            </>
+          )}
+        </Modal>
+      ) : null}
+
+      {happLink ? (
+        <Modal
+          onClose={() => setHappLink(null)}
+          title="Ссылка для Happ"
+          lead="Happ открывает такую ссылку сам, а адрес панели в ней не виден."
+          showCloseButton
+          footer={(
+            <>
+              <Button
+                tone="primary"
+                icon={<CopyIcon className="btn-icon" />}
+                disabled={!happLink.link}
+                onClick={() => void copyToClipboard(happLink.link).then(() => notify("success", "Ссылка скопирована"))}
+              >
+                Скопировать
+              </Button>
+              <Button
+                icon={<DiceIcon className="btn-icon" />}
+                disabled={happLinkLoading}
+                onClick={() => void openHappLink({ title: happLink.title, url: happLink.url })}
+              >
+                Другая ссылка
+              </Button>
+              <Button icon={<CloseIcon className="btn-icon" />} onClick={() => setHappLink(null)}>Закрыть</Button>
+            </>
+          )}
+        >
+          <div className="field">
+            <span className="field-label">Подписка</span>
+            <div className="status">{happLink.title} — {happLink.url}</div>
+          </div>
+          <div className="field">
+            <span className="field-label">happ://crypt5</span>
+            {happLinkLoading || !happLink.link
+              ? <div className="status">Собираем...</div>
+              : <Textarea rows={6} readOnly value={happLink.link} onFocus={(e) => e.currentTarget.select()} />}
+          </div>
+          <div className="composer-meta-hint">
+            Каждый раз получается новая строка — это нормально: ключ шифрования разовый.
+            Все они ведут на одну и ту же подписку.
+          </div>
+        </Modal>
+      ) : null}
+
       {showMerge ? (
         <MergeModal
           mergeId={mergeId}
@@ -3032,6 +3299,13 @@ export default function App() {
           outputAuto={mergeOutputAuto}
           onOutputAutoChange={setMergeOutputAuto}
           outputOptions={OUTPUT_OPTIONS}
+          shortId={mergeShortId}
+          onShortIdChange={setMergeShortId}
+          shortIdLocked={Boolean(mergeId)}
+          tags={mergeTags}
+          onTagsChange={setMergeTags}
+          hidden={mergeHidden}
+          onHiddenChange={setMergeHidden}
           items={mergeItems}
           onItemsChange={setMergeItems}
           preview={mergePreview}
@@ -3240,7 +3514,9 @@ export default function App() {
                     />
                   </div>
                   <div className="composer-hint">
-                    Обратная конвертация в исходный формат (json → json) отдаёт подписку как есть и этот выбор не учитывает.
+                    JSON-подписка отдаётся как есть, пока сворачивать нечего — в ней остаются dns и маршруты провайдера.
+                    Если внутри записи несколько узлов, подписка пересобирается, чтобы этот выбор сработал.
+                    Групп в JSON нет, поэтому «группами» там сворачивает так же, как «свернуть».
                   </div>
                 </>
               ) : null}
@@ -3418,7 +3694,9 @@ export default function App() {
           <div className="result-grid">
             <div className="result">
               <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
-              <select>{sourceServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
+              <ServerList className="result-servers">
+              {sourceServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
+            </ServerList>
               <div className="toolbar">
                 <TipIconButton tip="Копировать исходный ответ" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.upstream?.body || "")} />
                 <TipIconButton
@@ -3430,7 +3708,9 @@ export default function App() {
             </div>
             <div className="result">
               <strong>После конвертации: {testResult?.conversion?.outputFormat || "-"}</strong>
-              <select>{convertedServers.map((x, i) => <option key={`${x}-${i}`}>{x}</option>)}</select>
+              <ServerList className="result-servers">
+              {convertedServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
+            </ServerList>
               <div className="toolbar">
                 <TipIconButton tip="Копировать результат конвертации" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.conversion?.body || "")} />
                 <TipIconButton

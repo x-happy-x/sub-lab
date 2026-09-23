@@ -24,13 +24,14 @@ test("обычный пользователь чужого не видит", asy
   assert.deepEqual(await foreignFavorites(req, null, []), []);
 });
 
-test("админ видит все ссылки, чужие помечены владельцем", async () => {
+test("админ видит чужие ссылки с именем владельца", async () => {
   const list = await foreignFavorites(req, { username: "admin", role: "admin" }, []);
   const byId = new Map(list.map((item) => [item.shortId, item]));
 
-  assert.equal(byId.size, 3);
-  // Своя ссылка остаётся своей, даже если её нет в личном списке.
-  assert.equal(byId.get("own001").foreign, false);
+  assert.equal(byId.size, 2);
+  // Своя ссылка сюда не попадает, даже если её нет в личном списке: иначе
+  // убранная из списка подписка возвращалась бы как «выдана вам».
+  assert.equal(byId.has("own001"), false);
   assert.equal(byId.get("alien1").foreign, true);
   assert.equal(byId.get("alien1").ownerUsername, "petya");
   assert.equal(byId.get("alien2").foreign, true);
@@ -40,7 +41,7 @@ test("админ видит все ссылки, чужие помечены в�
 });
 
 test("то, что уже есть в списке, вторым экземпляром не приезжает", async () => {
-  const known = [{ shortId: "alien1" }, { shortId: "own001" }];
+  const known = [{ shortId: "alien1" }];
   const list = await foreignFavorites(req, { username: "admin", role: "admin" }, known);
   assert.deepEqual(list.map((item) => item.shortId), ["alien2"]);
 });

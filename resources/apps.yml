@@ -8,7 +8,16 @@ apps:
     label: Happ
     deeplink: "happ://add/{url}"
     platforms: [android, ios, linux, windows, macos]
-    formats: [raw]
+    # Первый формат — предпочтительный. Остальные перечислены, чтобы
+    # авто-формат не подменял ими осознанно выбранный.
+    formats: [raw, json]
+
+  - key: clash-meta
+    label: Clash.Meta
+    deeplink: "clash://install-config?url={url}"
+    platforms: [windows, macos, linux, android]
+    # Только Clash-конфиг: плоский список ссылок mihomo не читает.
+    formats: [yml]
 
   - key: flclashx
     label: FlClashX
@@ -20,7 +29,7 @@ apps:
     label: v2RayTun
     deeplink: "v2raytun://import/{url}"
     platforms: [android, ios]
-    formats: [raw]
+    formats: [raw, json]
 
   - key: koala-clash
     label: Koala Clash

@@ -315,12 +315,16 @@ export function StatsPage({ stats, loading, error, days, onDaysChange, onRefresh
         ) : (
           <ul className="device-feed">
             {stats.recentDevices.map((device) => (
-              <li key={`${device.shortLinkId}-${device.hwid}`} className={device.blocked ? "blocked" : ""}>
+              <li key={device.hwid} className={device.blocked ? "blocked" : ""}>
                 <span className="device-feed-dot" aria-hidden="true" />
                 <span className="device-feed-main">
                   <span className="device-feed-title">{device.deviceModel || device.os || "Неизвестное устройство"}</span>
                   <span className="device-feed-sub">
-                    {[device.app, device.os, device.title].filter(Boolean).join(" · ") || device.hwid}
+                    {[
+                      device.app,
+                      device.os,
+                      device.links > 1 ? `${device.links} подписки` : device.title,
+                    ].filter(Boolean).join(" · ") || device.hwid}
                   </span>
                 </span>
                 <span className="device-feed-time">{formatRelative(device.lastSeenAt)}</span>

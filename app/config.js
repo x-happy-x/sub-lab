@@ -23,10 +23,16 @@ const OUTPUT_RAW = "raw";
 const OUTPUT_RAW_BASE64 = "raw_base64";
 const OUTPUT_JSON = "json";
 const OUTPUT_CLASH = "clash";
+// Файл для `proxy-providers` mihomo: только список прокси, без групп и правил.
+// Полный конфиг в этой роли mihomo ругает («rule has no effective fields»), а
+// группы из него всё равно выбрасывает.
+const OUTPUT_CLASH_PROVIDER = "clash_provider";
 
 function normalizeOutput(value) {
   if (!value) return null;
   const s = String(value).trim().toLowerCase();
+  if (s === "provider" || s === "clash-provider" || s === OUTPUT_CLASH_PROVIDER
+    || s === "yml_provider" || s === "proxy-provider") return OUTPUT_CLASH_PROVIDER;
   if (s === "yml" || s === "yaml" || s === OUTPUT_CLASH) return OUTPUT_CLASH;
   if (s === "raw_base64" || s === "raw-base64" || s === "base64") return OUTPUT_RAW_BASE64;
   if (s === OUTPUT_JSON) return OUTPUT_JSON;
@@ -67,6 +73,7 @@ export {
   OUTPUT_RAW_BASE64,
   OUTPUT_JSON,
   OUTPUT_CLASH,
+  OUTPUT_CLASH_PROVIDER,
   OUTPUT_DEFAULT,
   OUT_RAW,
   OUT_YAML,

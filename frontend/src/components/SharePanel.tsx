@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Tooltip } from "../ui";
+import { ServerList, ServerRow } from "./ServerRow";
 import {
   AppClashmiIcon,
   AppFlclashxIcon,
@@ -441,13 +442,20 @@ export function SharePanel({
           </div>
           {Array.isArray(topMeta?.serverEntries) && topMeta.serverEntries.length > 0 ? (
             <div className="share-server-box">
-              <label className="composer-label" htmlFor="server-select">Сервер</label>
+              <span className="composer-label">Сервер</span>
+              <ServerList className="share-server-list">
+                {topMeta.serverEntries.map((row, idx) => (
+                  <ServerRow
+                    key={`${row.name}-${idx}`}
+                    name={row.name}
+                    uri={row.uri || ""}
+                    format={subscriptionFormat}
+                    selected={idx === selectedServerIdx}
+                    onClick={() => setSelectedServerIdx(idx)}
+                  />
+                ))}
+              </ServerList>
               <div className="row">
-                <select id="server-select" value={String(selectedServerIdx)} onChange={(e) => setSelectedServerIdx(Number(e.target.value || "0"))}>
-                  {topMeta.serverEntries.map((row, idx) => (
-                    <option key={`${row.name}-${idx}`} value={String(idx)}>{row.name}</option>
-                  ))}
-                </select>
                 {hasCopyableServerUri ? (
                   <Button onClick={() => onCopy(selectedServerUri)}>
                     <CopyIcon className="btn-icon" /> Копировать ссылку

@@ -189,7 +189,10 @@ function mergeUserinfo(list) {
     totals.download += info.download;
     if (info.total > 0) totals.total += info.total;
     else unlimited = true;
-    if (info.expire > 0 && (totals.expire === 0 || info.expire < totals.expire)) totals.expire = info.expire;
+    // Срок — самый дальний из источников: объединение работает, пока жив хотя
+    // бы один. По ближайшему выходило, что оно «кончается» вместе с первой же
+    // истёкшей подпиской, хотя остальные ещё отдают серверы.
+    if (info.expire > totals.expire) totals.expire = info.expire;
   }
   if (!seen) return "";
   // Хотя бы один безлимитный источник — общий лимит тоже безлимитный.

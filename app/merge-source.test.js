@@ -58,12 +58,14 @@ test("a broken pattern does not break the merge", () => {
   assert.equal(selected.filtered, false);
 });
 
-test("subscription userinfo is summed and the nearest expiry wins", () => {
+test("subscription userinfo is summed and the longest expiry wins", () => {
   const merged = mergeUserinfo([
     "upload=1000; download=2000; total=10000; expire=2000000000",
     "upload=500; download=1500; total=5000; expire=1900000000",
   ]);
-  assert.equal(merged, "upload=1500; download=3500; total=15000; expire=1900000000");
+  // Срок берём самый дальний: объединение живо, пока жив хотя бы один
+  // источник, а по ближайшему оно «кончалось» вместе с первой же подпиской.
+  assert.equal(merged, "upload=1500; download=3500; total=15000; expire=2000000000");
 
   // Безлимитный источник делает безлимитным всё объединение.
   assert.match(mergeUserinfo(["upload=1; download=1; total=100", "upload=1; download=1; total=0; expire=5"]), /total=0/);
