@@ -77,7 +77,6 @@ import { copyToClipboard } from "./lib/clipboard";
 import { FlaskIcon, ImportIcon, PlusIcon, ProfileIcon, CopyIcon, SaveIcon, SaveAsIcon, ThemeIcon, DiceIcon, TrashIcon, ListIcon, ShieldIcon, ChartIcon, TestIcon, CloseIcon } from "./icons";
 import { SubscriptionCard } from "./components/SubscriptionCard";
 import { SyncPeersPanel } from "./components/SyncPeersPanel";
-import { ServerList, ServerRow } from "./components/ServerRow";
 import { Modal } from "./components/Modal";
 import { AppShell, type ShellNavItem } from "./components/AppShell";
 import { UserMenu } from "./components/UserMenu";
@@ -2642,15 +2641,15 @@ export default function App() {
         <div className="result-grid">
           <div className="result">
             <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
-            <ServerList className="result-servers">
-              {sourceServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
-            </ServerList>
+            <ul className="merge-names result-servers">
+              {sourceServers.map((x, i) => <li key={`${x}-${i}`} className="hit"><span>{x}</span></li>)}
+            </ul>
           </div>
           <div className="result">
             <strong>После конвертации: {testResult?.conversion?.outputFormat || "-"}</strong>
-            <ServerList className="result-servers">
-              {convertedServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
-            </ServerList>
+            <ul className="merge-names result-servers">
+              {convertedServers.map((x, i) => <li key={`${x}-${i}`} className="hit"><span>{x}</span></li>)}
+            </ul>
           </div>
         </div>
       </section>
@@ -3149,13 +3148,8 @@ export default function App() {
           <div className="bulk-import-preview">
             {bulkImportFilteredItems.slice(0, 200).map((item) => (
               <article key={`${item.index}-${item.server}-${item.port}`} className="bulk-import-item">
-                <ServerList>
-                  <ServerRow
-                    name={item.normalizedName}
-                    uri={item.normalizedUri || item.uri}
-                    sub={`${item.type} · ${item.server}:${item.port} · ${item.network || "tcp"} · ${item.security || "none"}`}
-                  />
-                </ServerList>
+                <div className="bulk-import-title">{item.normalizedName}</div>
+                <div className="bulk-import-sub">{item.type} · {item.server}:{item.port} · {item.network} · {item.security}</div>
                 <div className="bulk-import-fields">
                   {item.uuid ? <span>uuid: {item.uuid}</span> : null}
                   {item.password ? <span>password: {item.password}</span> : null}
@@ -3694,9 +3688,9 @@ export default function App() {
           <div className="result-grid">
             <div className="result">
               <strong>Источник: {testResult?.upstream?.sourceFormat || "-"}</strong>
-              <ServerList className="result-servers">
-              {sourceServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
-            </ServerList>
+              <ul className="merge-names result-servers">
+              {sourceServers.map((x, i) => <li key={`${x}-${i}`} className="hit"><span>{x}</span></li>)}
+            </ul>
               <div className="toolbar">
                 <TipIconButton tip="Копировать исходный ответ" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.upstream?.body || "")} />
                 <TipIconButton
@@ -3708,9 +3702,9 @@ export default function App() {
             </div>
             <div className="result">
               <strong>После конвертации: {testResult?.conversion?.outputFormat || "-"}</strong>
-              <ServerList className="result-servers">
-              {convertedServers.map((x, i) => <ServerRow key={`${x}-${i}`} name={x} />)}
-            </ServerList>
+              <ul className="merge-names result-servers">
+              {convertedServers.map((x, i) => <li key={`${x}-${i}`} className="hit"><span>{x}</span></li>)}
+            </ul>
               <div className="toolbar">
                 <TipIconButton tip="Копировать результат конвертации" icon={<CopyIcon className="btn-icon" />} onClick={() => void copyToClipboard(testResult?.conversion?.body || "")} />
                 <TipIconButton
