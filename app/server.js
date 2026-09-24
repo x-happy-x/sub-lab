@@ -242,10 +242,18 @@ function escapeHtml(value) {
 }
 
 /** Страница с короткой человеческой ошибкой: одна карточка и необязательная кнопка. */
-function renderProblemPage(title, message, action = null) {
+/**
+ * Страница с объяснением: 404, блокировка, отказ входа.
+ *
+ * Отдельная от панели и самодостаточная: её видят те, у кого панели нет и не
+ * будет — человек с чужой ссылкой, которая больше не работает. Поэтому ни
+ * скриптов, ни шрифтов извне, всё в одном ответе.
+ */
+function renderProblemPage(title, message, action = null, code = 0) {
   const button = action
     ? `<a class="btn" href="${escapeHtml(action.href)}">${escapeHtml(action.label)}</a>`
     : "";
+  const badge = code > 0 ? `<span class="code">${escapeHtml(String(code))}</span>` : "";
   return `<!doctype html>
 <html lang="ru">
 <head>
@@ -255,34 +263,54 @@ function renderProblemPage(title, message, action = null) {
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f4f1ec; --surface: #fff; --line: rgba(35,28,21,.1);
-    --ink: #1c1917; --muted: #6d665d; --accent: #c25a35;
+    --bg: #f3f1ec; --surface: #fff; --line: rgba(32,26,20,.1);
+    --ink: #1b1917; --muted: #6c655c; --accent: #c2572f; --accent-ink: #fffaf7;
+    --tint-a: rgba(248,220,199,.75); --tint-b: rgba(217,232,234,.6);
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #131211; --surface: #1d1b19; --line: rgba(240,228,214,.12); --ink: #f0ebe4; --muted: #a49c92; --accent: #e08a5f; }
+    :root {
+      --bg: #121110; --surface: #1d1b19; --line: rgba(240,228,214,.12);
+      --ink: #f0ebe4; --muted: #a49c92; --accent: #e08a5f; --accent-ink: #1b1512;
+      --tint-a: rgba(120,64,38,.35); --tint-b: rgba(40,66,70,.35);
+    }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100svh; display: grid; place-items: center;
-    padding: 24px; background: var(--bg); color: var(--ink);
+    padding: 24px; color: var(--ink);
+    background:
+      radial-gradient(60vw 48vh at 12% -6%, var(--tint-a), transparent 62%),
+      radial-gradient(52vw 44vh at 92% 4%, var(--tint-b), transparent 58%),
+      var(--bg);
     font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.55;
   }
   .card {
-    width: min(460px, 100%); padding: 28px;
-    border: 1px solid var(--line); border-radius: 18px; background: var(--surface);
-    box-shadow: 0 18px 44px rgba(31,25,18,.1);
+    position: relative; width: min(460px, 100%); padding: 32px 28px 28px;
+    border: 1px solid var(--line); border-radius: 22px; background: var(--surface);
+    box-shadow: 0 20px 48px rgba(28,22,16,.14), 0 2px 6px rgba(28,22,16,.05);
+    animation: rise .32s cubic-bezier(.2,.7,.3,1) both;
   }
-  h1 { margin: 0 0 8px; font-size: 21px; letter-spacing: -.02em; }
-  p { margin: 0 0 18px; color: var(--muted); font-size: 14px; white-space: pre-wrap; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+  .code {
+    display: inline-block; margin-bottom: 14px; padding: 3px 10px;
+    border-radius: 999px; background: var(--accent); color: var(--accent-ink);
+    font-size: 12px; font-weight: 700; letter-spacing: .08em;
+  }
+  h1 { margin: 0 0 10px; font-size: 22px; letter-spacing: -.02em; }
+  p { margin: 0 0 20px; color: var(--muted); font-size: 14px; white-space: pre-wrap; }
   p:last-child { margin-bottom: 0; }
   a.btn {
-    display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 16px;
-    border-radius: 13px; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; text-decoration: none;
+    display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 0 18px;
+    border-radius: 13px; background: var(--accent); color: var(--accent-ink);
+    font-size: 14px; font-weight: 600; text-decoration: none;
   }
+  a.btn:hover { filter: brightness(1.06); }
 </style>
 </head>
 <body>
   <main class="card">
+    ${badge}
     <h1>${escapeHtml(title)}</h1>
     <p>${escapeHtml(message)}</p>
     ${button}
@@ -297,7 +325,7 @@ function sendProblemPage(res, status, title, message, extraHeaders = {}, action 
     "Cache-Control": "no-store",
     ...extraHeaders,
   });
-  res.end(renderProblemPage(title, message, action));
+  res.end(renderProblemPage(title, message, action, status));
 }
 
 function sendAuthProblem(res, status, title, message, extraHeaders = {}) {
@@ -1906,11 +1934,43 @@ function resolveShortLinkOutput(req, reqUrl, params, typeOverride) {
   return resolveOutputFromUserAgent(userAgent, stored).output || stored;
 }
 
+/**
+ * Ответ на подписку, которой нет.
+ *
+ * Голый текст «short link not found» понимал только тот, кто открыл ссылку в
+ * браузере и догадался посмотреть в тело ответа. Приложение же просто считало
+ * подписку сломанной и молчало — человек оставался без интернета и без
+ * объяснений.
+ *
+ * Поэтому браузеру отдаём страницу, а приложению — подписку из одного узла,
+ * имя которого и есть объяснение: это единственное место, где клиент покажет
+ * наш текст.
+ */
+function sendMissingSubscription(req, res, id, status = 404) {
+  const reqUrl = new URL(req.url || "/", "http://localhost");
+  const typeOverride = resolveShortLinkTypeOverride(reqUrl);
+  const title = "Подписка не найдена";
+  const message = "Ссылка не существует или её удалили. Проверьте адрес или попросите новую у того, кто её выдал.";
+
+  if (!typeOverride && wantsHtmlSharePage(req)) {
+    sendProblemPage(res, status, title, message, {}, { href: "/", label: "Открыть панель" });
+    return;
+  }
+
+  // Формата подписки у нас нет — её самой нет. Берём тот, что назван в ссылке,
+  // иначе подбираем по клиенту: ему это читать.
+  const output = resolveShortLinkOutput(req, reqUrl, { output_auto: "1" }, typeOverride);
+  const notice = renderAccessNotice(`${title}: ${String(id || "").slice(0, 40)}`, output);
+  // Статус именно 200: на 404 приложение не станет разбирать тело и покажет
+  // свою собственную ошибку вместо нашей.
+  res.writeHead(200, { "Content-Type": notice.contentType, "Cache-Control": "no-store" });
+  res.end(notice.body);
+}
+
 async function handleShortLinkResolve(req, res, id) {
   const found = await getPublicShortLink(id);
   if (!found.ok) {
-    res.writeHead(found.status || 404, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end(found.error || "short link not found");
+    sendMissingSubscription(req, res, id, found.status || 404);
     return;
   }
 
@@ -3508,6 +3568,8 @@ export {
   resolveLocalSourcePath,
   resolveRequestConfig,
   resolveShortLinkTypeOverride,
+  renderProblemPage,
+  sendMissingSubscription,
   produceOutput,
   fetchWithNode,
   fetchRemoteBundle,
