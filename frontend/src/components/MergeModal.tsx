@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { FavoriteItem, MergeItem, MergeOnEmpty, MergePreviewResult, SubscriptionPayload } from "../types";
 import { Badge, Button, Segmented, TextInput, Tooltip } from "../ui";
 import { Modal } from "./Modal";
-import { ServerList, ServerRow } from "./ServerRow";
 import { BYPASS_PATTERN as WHITELIST_PATTERN } from "../lib/servers";
 import { CloseIcon, PlusIcon, SaveIcon, TestIcon } from "../icons";
 
@@ -215,15 +214,16 @@ function MergeRow({
                     </span>
                   ) : null}
                 </div>
-                <ServerList className="merge-names">
-                  {names.slice(0, 60).map((name, index) => (
-                    <ServerRow
-                      key={`${name}-${index}`}
-                      name={name}
-                      muted={regex !== null && !regex.test(name)}
-                    />
-                  ))}
-                </ServerList>
+                <ul className="merge-names">
+                  {names.slice(0, 60).map((name, index) => {
+                    const hit = !regex || regex.test(name);
+                    return (
+                      <li key={`${name}-${index}`} className={hit ? "hit" : "miss"}>
+                        <span>{name}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
                 {names.length > 60 ? (
                   <div className="composer-meta-hint">…и ещё {names.length - 60}</div>
                 ) : null}

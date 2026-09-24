@@ -4104,20 +4104,13 @@ textarea,
   color: var(--accent);
 }
 
-/* Длинные списки серверов прокручиваются внутри себя, а не растягивают окно. */
-.share-server-list,
-.result-servers,
-.merge-names {
+/* Длинный список серверов прокручивается внутри себя, а не растягивает окно. */
+.share-server-list {
   max-height: 320px;
   overflow-y: auto;
 }
 
-.bulk-import-item > .server-list {
-  gap: 0;
-}
-
-.bulk-import-item > .server-list .server-row {
-  padding: 0;
-  border: 0;
-  background: transparent;
+/* В тестере чипов бывает много, а места под них меньше, чем в конструкторе. */
+.result-servers {
+  max-height: 220px;
 }

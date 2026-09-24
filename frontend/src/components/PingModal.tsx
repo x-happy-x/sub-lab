@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import type { PingMode, PingResponse } from "../types";
 import { Badge, Button, Segmented } from "../ui";
-import { ServerList, ServerRow } from "./ServerRow";
 import { Modal } from "./Modal";
 import { CloseIcon, TestIcon } from "../icons";
 
@@ -136,14 +135,14 @@ export function PingModal({
             </span>
           </div>
 
-          <ServerList className="ping-list">
+          <ul className="ping-list">
             {rows.map((row) => (
-              <ServerRow
-                key={`${row.id}-${row.host}-${row.port}`}
-                name={row.name}
-                sub={`${row.host}:${row.port}`}
-                dead={!row.ok}
-                trailing={row.ok ? (
+              <li key={`${row.id}-${row.host}-${row.port}`} className={row.ok ? "" : "dead"}>
+                <span className="ping-main">
+                  <span className="ping-name">{row.name}</span>
+                  <span className="ping-sub">{row.host}:{row.port}</span>
+                </span>
+                {row.ok ? (
                   <>
                     <span className="ping-bar" aria-hidden="true">
                       <span
@@ -160,9 +159,9 @@ export function PingModal({
                 ) : (
                   <span className="ping-error">{row.error || "нет ответа"}</span>
                 )}
-              />
+              </li>
             ))}
-          </ServerList>
+          </ul>
         </>
       ) : null}
     </Modal>
