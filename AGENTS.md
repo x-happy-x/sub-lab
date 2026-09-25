@@ -12,6 +12,7 @@
 - `frontend/src/` contains the React UI (main page, admin page, public share page `/l/:id`); `frontend/src/ui/` holds the local design-system primitives (buttons, card, modal header, toasts, tooltip) and `frontend/src/styles/main.scss` the design tokens.
 - `resources/profiles/*.yml` stores device header profiles.
 - `resources/ua-catalog.json` stores UA mapping by `os/app`.
+- `mobile/` is the Android client (see `mobile/README.md`): `mobile/core/` is the Go library `libcore` (xray-core + mihomo, bound with gomobile), `mobile/android/` the Kotlin/Compose app, `mobile/build-core.sh` builds `libcore.aar`.
 - `data/` is a bind-mounted runtime volume (`sub-lab.sqlite`, cache and debug artifacts); locally point `SUB_LAB_DATA_DIR` somewhere writable.
 
 ## Build, Test, and Development Commands
@@ -21,7 +22,9 @@
 - `cd frontend && npm run build` builds frontend bundle.
 - `node --test app/server.test.js` runs server/unit tests; `node --test app/*.test.js` runs all of them (permissions, snapshots, usage stats).
 - `node app/server.js` runs HTTP service locally (Node 18+; expects env vars).
-- GitHub Actions workflow: `.github/workflows/docker-image.yml` runs tests + frontend build, then docker build; image push happens on `push` events only.
+- GitHub Actions workflow: `.github/workflows/mobile-apk.yml` builds the Android client (Go tests, TUN e2e, `libcore.aar`, APK artifact); build only, no deploy.
+- `cd mobile/core && go test -tags with_gvisor ./...` runs the mobile core tests; `sudo mobile/core/e2e.sh` drives both engines through a real TUN.
+- `./mobile/build-core.sh` (needs `ANDROID_HOME`, `ANDROID_NDK_HOME`) then `cd mobile/android && ./gradlew assembleRelease` builds the APK.
 - Deployment rule for this repo: after each user-requested code/UI change, run deploy immediately via `./deploy.sh` unless the user explicitly says not to deploy.
 - `deploy/first-deploy.py` and `deploy/update.py` install/update the full stack (sub-lab + account + lldap) on a standalone server; targets live in the gitignored `deploy/targets.local.json`. Requires `paramiko` and compose v2 on the remote.
 
