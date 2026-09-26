@@ -17,8 +17,17 @@
   - `/api/apps`
   - `/api/apps/guide?app=...&os=...`
 - Авторизация и роли account (`viewer`/`editor`/`admin`), админка `/admin`.
+- Вход по логину и паролю для клиентов без браузера: `POST /api/auth/password`
+  (`{"login","password"}` → `{"token","expires","user"}`), дальше запросы идут с
+  `Authorization: Bearer <token>`. Так Android-клиент [KVN](https://github.com/x-happy-x/kvn)
+  подтягивает подписки пользователя из `GET /api/favorites`.
 - Статистика `/stats`: обращения по дням, устройства, разрезы по ОС и приложениям.
 - Favorites, mock-sources, профильный редактор.
+
+## Мобильный клиент
+
+Android-клиент с двумя ядрами — Xray и Mihomo — живёт в отдельном
+репозитории [x-happy-x/kvn](https://github.com/x-happy-x/kvn).
 
 ## Роли и интерфейс
 

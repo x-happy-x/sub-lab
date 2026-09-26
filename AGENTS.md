@@ -21,7 +21,7 @@
 - `cd frontend && npm run build` builds frontend bundle.
 - `node --test app/server.test.js` runs server/unit tests; `node --test app/*.test.js` runs all of them (permissions, snapshots, usage stats).
 - `node app/server.js` runs HTTP service locally (Node 18+; expects env vars).
-- GitHub Actions workflow: `.github/workflows/docker-image.yml` runs tests + frontend build, then docker build; image push happens on `push` events only.
+- There is no CI workflow in this repo. The Android client lives in https://github.com/x-happy-x/kvn.
 - Deployment rule for this repo: after each user-requested code/UI change, run deploy immediately via `./deploy.sh` unless the user explicitly says not to deploy.
 - `deploy/first-deploy.py` and `deploy/update.py` install/update the full stack (sub-lab + account + lldap) on a standalone server; targets live in the gitignored `deploy/targets.local.json`. Requires `paramiko` and compose v2 on the remote.
 
