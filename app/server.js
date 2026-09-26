@@ -434,7 +434,7 @@ function accountLogoutLocation(req) {
   return url.href;
 }
 
-async function accountRequest(pathname, { method = "GET", token = "", body, service = false } = {}) {
+async function accountRequest(pathname, { method = "GET", token = "", body, service = false, withHeaders = false } = {}) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers.Cookie = `${ACCOUNT_SESSION_COOKIE}=${encodeURIComponent(token)}`;
@@ -443,7 +443,7 @@ async function accountRequest(pathname, { method = "GET", token = "", body, serv
   if (payload) headers["Content-Length"] = Buffer.byteLength(payload);
   const url = new URL(pathname, `${ACCOUNT_URL}/`);
   const transport = url.protocol === "https:" ? https : http;
-  const { statusCode, text } = await new Promise((resolve, reject) => {
+  const { statusCode, text, responseHeaders } = await new Promise((resolve, reject) => {
     const request = transport.request(
       url,
       {
@@ -457,6 +457,7 @@ async function accountRequest(pathname, { method = "GET", token = "", body, serv
         response.on("end", () => resolve({
           statusCode: Number(response.statusCode || 0),
           text: Buffer.concat(chunks).toString("utf8"),
+          responseHeaders: response.headers,
         }));
       },
     );
@@ -477,7 +478,25 @@ async function accountRequest(pathname, { method = "GET", token = "", body, serv
     error.status = statusCode;
     throw error;
   }
-  return json;
+  return withHeaders ? { json, headers: responseHeaders } : json;
+}
+
+/**
+ * Токен сессии account из Set-Cookie ответа на вход по паролю.
+ */
+function accountSessionFromSetCookie(setCookie) {
+  const lines = Array.isArray(setCookie) ? setCookie : [setCookie].filter(Boolean);
+  for (const line of lines) {
+    const [pair, ...attributes] = String(line).split(";");
+    const index = pair.indexOf("=");
+    if (index < 0 || pair.slice(0, index).trim() !== ACCOUNT_SESSION_COOKIE) continue;
+    const token = decodeURIComponent(pair.slice(index + 1).trim());
+    if (!token) continue;
+    const expiresAttr = attributes.find((item) => /^\s*expires=/i.test(item));
+    const expires = expiresAttr ? new Date(expiresAttr.split("=").slice(1).join("=").trim()) : null;
+    return { token, expires: expires && !Number.isNaN(expires.getTime()) ? expires.toISOString() : null };
+  }
+  return null;
 }
 
 async function accountMe(token) {
@@ -2281,6 +2300,43 @@ async function handleAuthLogin(req, res) {
   sendJson(res, 200, { ok: true, redirect: start.location }, { "Set-Cookie": start.cookie });
 }
 
+/**
+ * Вход по логину и паролю для клиентов без браузера (Android-клиент KVN).
+ *
+ * Пароль account принимает только на внутреннем порту, поэтому sub-lab
+ * проксирует вход и отдаёт токен сессии в теле ответа. Дальше клиент ходит
+ * с `Authorization: Bearer <token>`, как и браузер с cookie. Перебор паролей
+ * ограничивает сам account (по логину).
+ */
+async function handleAuthPassword(req, res) {
+  const body = await readJsonBody(req).catch(() => ({}));
+  const login = String(body?.login || "").trim();
+  const password = String(body?.password || "");
+  if (!login || !password) {
+    sendJson(res, 400, { ok: false, error: "Укажите логин и пароль" });
+    return;
+  }
+  let result;
+  try {
+    result = await accountRequest("/api/auth/login", { method: "POST", body: { login, password }, withHeaders: true });
+  } catch (e) {
+    const status = [400, 401, 429].includes(e?.status) ? e.status : 502;
+    sendJson(res, status, { ok: false, error: e?.message || "Account не ответил" });
+    return;
+  }
+  const session = accountSessionFromSetCookie(result.headers?.["set-cookie"]);
+  if (!session) {
+    sendJson(res, 502, { ok: false, error: "Account не выдал сессию" });
+    return;
+  }
+  const user = accountUserForUi(result.json?.user);
+  if (!user) {
+    sendJson(res, 403, { ok: false, error: "Нет доступа к Sub Lab: в account не назначена роль sub_mirror", accessRequired: true });
+    return;
+  }
+  sendJson(res, 200, { ok: true, token: session.token, expires: session.expires, user });
+}
+
 async function handleAuthLogout(req, res) {
   sendJson(
     res,
@@ -3113,6 +3169,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "POST" && routePath === "/api/auth/login") {
     await handleAuthLogin(req, res);
+    return;
+  }
+  if (req.method === "POST" && routePath === "/api/auth/password") {
+    await handleAuthPassword(req, res);
     return;
   }
   if (req.method === "POST" && routePath === "/api/auth/logout") {
