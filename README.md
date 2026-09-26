@@ -22,9 +22,8 @@
 
 ## Мобильный клиент
 
-В `mobile/` лежит Android-клиент с двумя ядрами — Xray и Mihomo — и
-переключателем между ними. Сборка и устройство описаны в
-[`mobile/README.md`](mobile/README.md).
+Android-клиент с двумя ядрами — Xray и Mihomo — живёт в отдельном
+репозитории [x-happy-x/kvn](https://github.com/x-happy-x/kvn).
 
 ## Роли и интерфейс
 
